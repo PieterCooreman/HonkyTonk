@@ -31,7 +31,8 @@
       <h1 class="display">Honkytonk<span class="accent">Stems</span></h1>
       <p class="tagline">
         Upload an MP3. We'll detect the tempo and chords, then conjure a country band —
-        drums, bass, piano, and pedal steel — you can download as separate WAV stems.
+        drums, bass, piano, and pedal steel — that you can audition against the original
+        and download as separate WAV stems.
       </p>
     </header>
 
@@ -75,6 +76,10 @@
           <div class="stat"><div class="value" id="stat-bpm"></div><div class="label">BPM</div></div>
           <div class="stat"><div class="value" id="stat-key"></div><div class="label">Key (est.)</div></div>
           <div class="stat"><div class="value" id="stat-chords"></div><div class="label">Chords</div></div>
+          <div class="stat stat-feel">
+            <select id="feel-select" class="feel-select" aria-label="Feel"></select>
+            <div class="label">Feel</div>
+          </div>
         </div>
 
         <div id="chord-section" class="hidden">
@@ -82,9 +87,41 @@
           <div id="chord-list" class="chord-list"></div>
         </div>
 
-        <div id="stems-section" class="hidden">
-          <div class="section-label">Generated stems</div>
-          <div id="stems-grid" class="stems"></div>
+        <div id="mixer-section" class="hidden">
+          <div class="mixer-header">
+            <div class="section-label">Play along</div>
+            <button id="download-all" type="button" class="btn btn-secondary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download all stems
+            </button>
+          </div>
+
+          <div class="transport">
+            <button id="transport-play" type="button" class="btn-play">Play</button>
+            <span id="transport-time"  class="transport-time">0:00</span>
+            <input id="transport-seek" class="transport-seek" type="range"
+                   min="0" max="100" step="0.05" value="0" aria-label="Seek" />
+            <span id="transport-total" class="transport-time">0:00</span>
+          </div>
+
+          <div id="mixer-tracks" class="mixer-tracks"></div>
+
+          <div class="offset-row">
+            <label for="offset-slider" class="offset-label-text">Stems offset vs original</label>
+            <input id="offset-slider" class="offset-slider" type="range"
+                   min="-500" max="500" step="5" value="0" />
+            <span id="offset-label" class="offset-value">0 ms</span>
+          </div>
+
+          <p class="mixer-hint">
+            Use mute (<kbd>M</kbd>) / solo (<kbd>S</kbd>) per track. Spacebar toggles play/pause.
+            If the band feels a touch ahead of or behind the song, nudge with the offset slider.
+          </p>
         </div>
       </div>
     </section>

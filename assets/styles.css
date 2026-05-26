@@ -246,7 +246,7 @@ h1.display .accent {
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0,1fr));
+  grid-template-columns: repeat(2, minmax(0,1fr));
   gap: 1rem;
   border: 1px solid var(--border);
   background: color-mix(in oklab, var(--background) 40%, transparent);
@@ -254,18 +254,78 @@ h1.display .accent {
   padding: 1.25rem;
   text-align: center;
 }
+@media (min-width: 640px) {
+  .stats { grid-template-columns: repeat(4, minmax(0,1fr)); }
+}
 .stat .value {
   font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
   font-size: 2.25rem;
   color: var(--primary);
   letter-spacing: .04em;
+  line-height: 1;
+}
+.stat .value.stat-value-small {
+  /* Words like "Train beat" need to fit in a column */
+  font-size: 1.5rem;
 }
 .stat .label {
   font-size: .75rem;
   text-transform: uppercase;
   letter-spacing: .15em;
   color: var(--muted-foreground);
-  margin-top: .25rem;
+  margin-top: .375rem;
+}
+
+/* Feel selector (replaces the static "value" stat for Feel) ------------ */
+
+.stat.stat-feel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0;
+}
+
+.feel-select {
+  font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
+  font-size: 1.25rem;
+  letter-spacing: .04em;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--background) 55%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .2rem .35rem;
+  width: 100%;
+  max-width: 100%;
+  text-align: center;
+  text-align-last: center;          /* Firefox-friendly centered display */
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--primary) 50%),
+    linear-gradient(135deg, var(--primary) 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) calc(50% + 1px),
+    calc(100% - 7px)  calc(50% + 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 1.35rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+}
+.feel-select:hover { border-color: var(--primary); }
+.feel-select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+.feel-select:disabled { opacity: .5; cursor: not-allowed; }
+.feel-select option {
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: .9rem;
+  background: var(--card);
+  color: var(--foreground);
 }
 
 /* Chord list ------------------------------------------------------------- */
@@ -294,49 +354,238 @@ h1.display .accent {
   padding: .25rem .5rem;
 }
 
-/* Stems grid ------------------------------------------------------------ */
+/* Mixer ------------------------------------------------------------------ */
 
-.stems {
-  display: grid;
-  gap: .75rem;
-}
-@media (min-width: 640px) {
-  .stems { grid-template-columns: 1fr 1fr; }
+.mixer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .75rem;
+  flex-wrap: wrap;
 }
 
-.stem {
+.transport {
   display: flex;
   align-items: center;
   gap: .75rem;
+  padding: .75rem 1rem;
   border: 1px solid var(--border);
   background: color-mix(in oklab, var(--background) 40%, transparent);
   border-radius: var(--radius);
-  padding: .75rem;
+  margin-bottom: .75rem;
 }
-.stem .stem-icon {
+
+.btn-play {
+  border: 1px solid transparent;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+  font-size: .875rem;
+  padding: .5rem 1.25rem;
+  border-radius: var(--radius);
+  min-width: 4.5rem;
+  letter-spacing: .02em;
+}
+.btn-play:hover { filter: brightness(1.1); }
+.btn-play.is-playing { background: color-mix(in oklab, var(--primary) 70%, white 20%); }
+
+.transport-time {
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
+  font-size: .875rem;
+  color: var(--muted-foreground);
+  min-width: 3rem;
+  text-align: center;
+}
+
+.transport-seek {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: var(--muted);
+  border-radius: 9999px;
+  cursor: pointer;
+}
+.transport-seek::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 0;
+  cursor: grab;
+}
+.transport-seek::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 0;
+  cursor: grab;
+}
+
+.mixer-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: .375rem;
+}
+
+.track {
+  display: grid;
+  grid-template-columns: 9rem auto 1fr auto;
+  align-items: center;
+  gap: .75rem;
+  padding: .5rem .75rem;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 40%, transparent);
+  border-radius: var(--radius);
+}
+
+.track-name {
+  font-weight: 500;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track-name-original {
+  color: var(--primary);
+}
+
+.track-buttons {
+  display: flex;
+  gap: .25rem;
+}
+.track-btn {
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: .75rem;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: color-mix(in oklab, var(--background) 70%, transparent);
+  color: var(--muted-foreground);
+  border-radius: 4px;
+  padding: 0;
+  transition: background-color .12s, color .12s, border-color .12s;
+}
+.track-btn:hover { color: var(--foreground); border-color: var(--primary); }
+.track-btn.is-on-mute  { background: var(--destructive); border-color: var(--destructive); color: white; }
+.track-btn.is-on-solo  { background: var(--primary);     border-color: var(--primary);     color: var(--primary-foreground); }
+
+.track-volume {
+  display: flex;
+  align-items: center;
+}
+.track-volume input[type="range"] {
+  width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--muted);
+  border-radius: 9999px;
+  cursor: pointer;
+}
+.track-volume input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 0;
+}
+.track-volume input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 0;
+}
+
+.track-download,
+.track-download-placeholder {
+  width: 2rem;
+  height: 2rem;
   flex-shrink: 0;
-  width: 2.5rem;
-  height: 2.5rem;
+}
+.track-download {
+  background: var(--secondary);
+  border: 1px solid transparent;
+  color: var(--secondary-foreground);
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: .375rem;
-  background: color-mix(in oklab, var(--primary) 15%, transparent);
-  color: var(--primary);
 }
-.stem .stem-icon svg { width: 1.25rem; height: 1.25rem; }
-.stem .stem-body {
-  flex: 1;
-  min-width: 0;
+.track-download:hover { filter: brightness(1.15); }
+.track-download svg { width: .9rem; height: .9rem; }
+
+.offset-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: .75rem;
+  margin-top: .75rem;
+  padding: .5rem .25rem;
+  font-size: .8125rem;
+  color: var(--muted-foreground);
 }
-.stem .stem-name {
-  font-weight: 500;
-  color: var(--foreground);
+.offset-label-text { white-space: nowrap; }
+.offset-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--muted);
+  border-radius: 9999px;
+  cursor: pointer;
 }
-.stem audio {
-  width: 100%;
-  height: 1.75rem;
-  margin-top: .25rem;
+.offset-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 0;
+}
+.offset-slider::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--primary); border: 0;
+}
+.offset-value {
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
+  min-width: 4rem;
+  text-align: right;
+}
+
+.mixer-hint {
+  margin: .75rem 0 0;
+  font-size: .75rem;
+  color: var(--muted-foreground);
+}
+.mixer-hint kbd {
+  display: inline-block;
+  padding: 0 .25rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--background) 70%, transparent);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: .7rem;
+}
+
+/* On narrow screens, collapse track grid */
+@media (max-width: 540px) {
+  .track {
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto;
+    row-gap: .25rem;
+  }
+  .track-name { grid-column: 1; }
+  .track-buttons { grid-column: 2; grid-row: 1; }
+  .track-volume { grid-column: 1 / -1; grid-row: 2; }
+  .track-download, .track-download-placeholder { display: none; }
 }
 
 /* Error message --------------------------------------------------------- */
