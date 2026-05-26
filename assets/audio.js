@@ -15,11 +15,36 @@ export const STEM_LABELS = {
   pedalSteel: "Pedal Steel",
 };
 
-// Diatonic scale degrees (semitones from root) for major and minor.
-const SCALE = {
-  maj: [0, 2, 4, 5, 7, 9, 11],
-  min: [0, 2, 3, 5, 7, 8, 10],   // natural minor
+// ----------------------------------------------------------------------------
+// Country scale palette (semitone offsets from the scale's root note).
+//
+// These are the note pools the melodic stems pick from. Each one has a flavor:
+//   - MAJOR_PENTATONIC: "safe" major — root, 2, 3, 5, 6. No half-steps. The
+//     bread-and-butter for fiddle/Tele runs and bass walks over a major chord.
+//   - MIXOLYDIAN:       major scale with b7. The b7 ("flat seven") is the
+//     iconic country twang — think the lick at the end of every Hank Williams
+//     line. Used most often for licks and fills over a major chord.
+//   - MAJOR:            full diatonic major scale. Used for passing tones and
+//     for the V chord (which wants the leading tone, the natural 7).
+//   - BLUES:            R, b3, 4, b5, 5, b7. Sparingly — for blue-note bends.
+//   - HYBRID_COUNTRY:   major scale fused with the b3 and b7 from blues —
+//     gives access to "the country lick" (b3 -> 3 hammer-on, b7 -> R resolve).
+//     This is what most session musicians actually play over a major chord.
+//   - DORIAN:           minor with natural 6. The country-friendly minor scale
+//     (e.g. for vi). Pure natural-minor sounds rock/sad; Dorian is brighter.
+// ----------------------------------------------------------------------------
+const SCALES = {
+  major:            [0, 2, 4, 5, 7, 9, 11],
+  majorPentatonic:  [0, 2, 4, 7, 9],
+  mixolydian:       [0, 2, 4, 5, 7, 9, 10],     // b7
+  blues:            [0, 3, 5, 6, 7, 10],         // R b3 4 b5 5 b7
+  hybridCountry:    [0, 2, 3, 4, 5, 7, 9, 10],  // major + b3 + b7
+  dorian:           [0, 2, 3, 5, 7, 9, 10],     // minor with natural 6
+  naturalMinor:     [0, 2, 3, 5, 7, 8, 10],
 };
+
+// Legacy alias for any callers still asking by maj/min.
+const SCALE = { maj: SCALES.major, min: SCALES.naturalMinor };
 
 // Krumhansl-Schmuckler key profiles (correlation-based key finding).
 const KRUMHANSL_MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -579,12 +604,78 @@ function voiceLedTriad(rootPc, quality, previousVoicing) {
 // SCALE HELPERS
 // ============================================================================
 
-// Pick a scale to use for melodic motion over a given chord, given the song's key.
-// Strategy: use the chord's own scale (maj/min) but choose the *mode of the key*
-// that contains the chord's third — keeps everything in-key.
-function scaleForChord(chordRoot, chordQuality, keyRoot, keyQuality) {
-  // Default: chord's own pentatonic-friendly major or minor scale.
-  return SCALE[chordQuality].map((d) => (chordRoot + d) % 12);
+// Pick the country-idiomatic scale for a given chord, given the song's key.
+// `role` is what we're going to do with it:
+//   "walk"   — bass walking line. Pentatonic + 6 + b7. No half-steps under bass.
+//   "fill"   — piano/lead fill ending on the next chord. Hybrid country scale.
+//   "lick"   — quick embellishment. Mixolydian for major, Dorian for minor.
+//   "pad"    — sustained pad. Plain diatonic, no blues notes.
+//
+// Returns an array of pitch classes (0..11). Sorted ascending mod 12.
+//
+// The Nashville rule of thumb:
+//   over the I (tonic major)  → hybrid country / mixolydian
+//   over the IV (subdominant) → mixolydian (its own b7 is the I's natural 7
+//                                — sounds great)
+//   over the V (dominant)     → MAJOR, not mixolydian. We want the leading
+//                                tone (the key's natural 7) to pull back to I.
+//   over the vi (rel-minor)   → Dorian
+//   over any other minor      → Dorian
+function scaleForChord(chordRoot, chordQuality, keyRoot, keyQuality, role = "fill") {
+  const degreeFromKey = (chordRoot - keyRoot + 12) % 12;
+  const isV  = keyQuality === "maj" && degreeFromKey === 7;
+  const isIV = keyQuality === "maj" && degreeFromKey === 5;
+  const isI  = degreeFromKey === 0 && chordQuality === keyQuality;
+
+  let scalePattern;
+  if (role === "walk") {
+    // Bass walks: minor pentatonic-plus-6 over minor, major-pentatonic-plus-6-b7
+    // over major. Avoids half-steps in the low end.
+    scalePattern = chordQuality === "min"
+      ? [0, 3, 5, 7, 9, 10]    // R b3 4 5 6 b7 — minor blues walk
+      : [0, 2, 4, 7, 9, 10];   // R 2 3 5 6 b7 — country major walk
+  } else if (chordQuality === "min") {
+    scalePattern = SCALES.dorian;
+  } else if (isV) {
+    // V chord — major's mixolydian gives the b7 ("twang") plus the chord's
+    // own leading tone (which is the key's 2nd) and access to the resolution.
+    scalePattern = SCALES.mixolydian;
+  } else if (role === "pad") {
+    scalePattern = SCALES.major;
+  } else if (role === "lick") {
+    scalePattern = SCALES.mixolydian;
+  } else {
+    // "fill" or default — the hybrid country scale (major + b3 + b7).
+    scalePattern = SCALES.hybridCountry;
+  }
+  return scalePattern.map((d) => (chordRoot + d) % 12);
+}
+
+// Human-readable name for the scale picked above. Used for tooltips on chord pills.
+export function describeScale(chordRoot, chordQuality, keyRoot, keyQuality) {
+  const degreeFromKey = (chordRoot - keyRoot + 12) % 12;
+  const isV = keyQuality === "maj" && degreeFromKey === 7;
+  if (chordQuality === "min") return "Dorian";
+  if (isV) return "Mixolydian";
+  return "Hybrid country";
+}
+
+// Nashville-style Roman numeral analysis for display: I, ii, iii, IV, V, vi, etc.
+// Falls back to "n/c" (no chord function) for out-of-key chords.
+export function romanNumeral(chordRoot, chordQuality, keyRoot, keyQuality) {
+  const degree = (chordRoot - keyRoot + 12) % 12;
+  // Map of semitones-from-key-tonic to (Roman major, Roman minor) labels.
+  // Indices align with the major-scale degrees in keyQuality === "maj".
+  const major = ["I", null, "ii", null, "iii", "IV", null, "V", null, "vi", null, "vii°"];
+  const minor = ["i", null, "ii°", "III", null, "iv", null, "v", "VI", null, "VII", null];
+  const labels = keyQuality === "maj" ? major : minor;
+  let label = labels[degree];
+  if (!label) return "";  // out-of-key — leave blank
+  // Force quality casing to match the actual detected chord. e.g. a major V
+  // detected as minor would show "v" instead of "V".
+  if (chordQuality === "min" && /^[A-Z]+$/.test(label)) label = label.toLowerCase();
+  if (chordQuality === "maj" && /^[a-z]+$/.test(label)) label = label.toUpperCase();
+  return label;
 }
 
 // Find the closest MIDI note in a given pitch-class set to a target MIDI note.
@@ -978,31 +1069,50 @@ function renderBass(ctx, master, { chords, beats, duration, groove, rng, keyRoot
 
     const rootPc = seg.root;
     const fifthPc = (rootPc + 7) % 12;
-    const scalePcs = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality);
+    // Walk scale: pentatonic + 6 + b7 (no half-steps under the bass).
+    const walkScale = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality, "walk");
 
     let pc;
-    let approachJitter = 0;
 
     if (isLastBeatOfChord && nextSeg !== seg) {
-      // Approach: stepwise scalar approach to next chord root from above or below.
-      const targetPc = nextSeg.root;
-      const fromMidi = 36 + rootPc;
-      const toMidi = 36 + targetPc;
-      const approach = nearestInScale(toMidi - (toMidi > fromMidi ? 2 : -2), scalePcs);
-      pc = approach % 12;
+      // Approach the next chord's root. Country idiom: either a diatonic
+      // step (in the *next* chord's scale) or a chromatic leading tone
+      // a half-step below. We pick chromatic ~40% of the time over major
+      // chords for the classic "country walk-up."
+      const nextRootPc = nextSeg.root;
+      const nextScale = scaleForChord(nextSeg.root, nextSeg.quality, keyRoot, keyQuality, "walk");
+      const chromatic = rng() < 0.4 && nextSeg.quality === "maj";
+      if (chromatic) {
+        pc = (nextRootPc + 11) % 12;             // half-step below next root
+      } else {
+        // Diatonic step from above or below the next root, in next chord's scale.
+        const fromMidi = 36 + rootPc;
+        const toMidi   = 36 + nextRootPc;
+        const dir = toMidi >= fromMidi ? -1 : 1; // approach from the closer side
+        const approach = nearestInScale(toMidi + dir * 2, nextScale);
+        pc = ((approach % 12) + 12) % 12;
+      }
     } else if (groove.bassFeel === "two") {
-      // Root on odd, fifth on even (or root on 1+3, fifth on 2+4 depending on local count)
+      // Boom-chick: root on 1 & 3, fifth on 2 & 4 (relative to chord onset).
       const localBeat = (bi - beats.findIndex((tb) => tb >= seg.start - 0.005));
       pc = localBeat % 2 === 0 ? rootPc : fifthPc;
     } else {
-      // walking: cycle through 1-3-5-6 scale degrees
+      // Walking: classic country bass pattern R-3-5-6 (over a major chord) or
+      // R-b3-5-6 (over a minor). Cycles 4-beat phrases relative to chord onset.
+      // walkScale for a major chord = [R, 2, 3, 5, 6, b7]; we take indices
+      // [0, 2, 3, 4] which gives R, 3, 5, 6.
       const localBeat = bi - beats.findIndex((tb) => tb >= seg.start - 0.005);
-      const scaleDegrees = [0, 2, 4, 5];  // R-3-5-6 by index into scalePcs
+      // For minor (Dorian-flavored walk), scaleForChord returns the dorian
+      // pattern instead: [R, 2, b3, 5, 6, b7]; the same indices give R, b3, 5, 6.
+      const scaleDegrees =
+        groove.bassFeel === "walk"
+          ? (walkScale.length >= 4 ? [0, 2, 3, 4] : [0, 0, 0, 0])
+          : [0, 0, 0, 0];
       const idx = scaleDegrees[localBeat % scaleDegrees.length] ?? 0;
-      pc = scalePcs[idx];
+      pc = walkScale[Math.min(idx, walkScale.length - 1)];
     }
 
-    const midi = 36 + pc;                   // C2 = 36; pc adjusts within an octave
+    const midi = 36 + pc;
     const noteDur = spb * (0.88 + jitter(rng, 0.05));
     const vel = 0.85 + jitter(rng, 0.12);
     playBassNote(ctx, master, midi, t + jitter(rng, 0.004), noteDur, vel);
@@ -1072,17 +1182,34 @@ function addScalarFill(ctx, master, voicing, seg, nextSeg, spb, rng, keyRoot, ke
   const fillStart = seg.end - spb * fillBeats;
   if (fillStart <= seg.start) return;
 
-  // Use the current chord's scale for the lick; target the next chord's root.
-  const scalePcs = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality);
+  // Hybrid country scale on the current chord — gives us pentatonic + b3 + b7.
+  const scalePcs = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality, "fill");
+
+  // Phrase grammar:
+  //   - START on a chord tone (root / 3rd / 5th) of the *current* chord.
+  //   - END on the ROOT (or 5th) of the *next* chord.
+  //   - Move stepwise within the chosen scale, no leaps larger than a 3rd.
+  const chordToneOffsets = seg.quality === "maj" ? [0, 4, 7] : [0, 3, 7];
+  const startPc = (seg.root + chordToneOffsets[Math.floor(rng() * chordToneOffsets.length)]) % 12;
+  // Pick a starting MIDI near the previous top voice for smooth voice-leading.
   const topVoice = voicing[voicing.length - 1];
-  const targetMidi = nearestInScale(12 * 5 + nextSeg.root, scalePcs); // around C5
-  // Build a 3 or 4 note scalar descent/ascent toward target
-  const notes = 4;
+  const startMidi = nearestInScale(topVoice + 0, [startPc]);
+
+  // End target: the root (80%) or the 5th (20%) of the next chord, near the start MIDI.
+  const endPc = rng() < 0.8 ? nextSeg.root : (nextSeg.root + 7) % 12;
+  const endMidi = nearestInScale(startMidi, [endPc]);
+
+  const notes = 4;                   // 4 sixteenth-ish notes across one beat
   const step = (spb * fillBeats) / notes;
-  const line = walkingLine(topVoice, targetMidi, notes, scalePcs);
+  const line = walkingLine(startMidi, endMidi, notes, scalePcs);
+
   for (let i = 0; i < line.length; i++) {
-    const t = fillStart + i * step + jitter(rng, 0.005);
-    playPianoNote(ctx, master, line[i], t, step * 0.85, 0.55 + jitter(rng, 0.08));
+    // Pushing slightly ahead of the beat is idiomatic; never drag behind.
+    const ahead = -Math.abs(jitter(rng, 0.006));
+    const t = fillStart + i * step + ahead;
+    // Slight velocity arc: louder in the middle of the lick.
+    const vel = 0.5 + (i === 1 || i === 2 ? 0.15 : 0) + jitter(rng, 0.06);
+    playPianoNote(ctx, master, line[i], t, step * 0.85, vel);
   }
 }
 

@@ -7,6 +7,8 @@ import {
   renderAllStems,
   STEM_LABELS,
   describeGroove,
+  describeScale,
+  romanNumeral,
   AVAILABLE_GROOVES,
 } from "./audio.js";
 
@@ -292,12 +294,21 @@ function render() {
     const chords = state.analysis.chords;
     const shown = chords.slice(0, 64);
     const moreCount = chords.length - shown.length;
+    const keyRoot = state.analysis.keyRoot;
+    const keyQuality = state.analysis.keyQuality;
     els.chordList.replaceChildren(
       ...shown.map((seg) => {
         const span = document.createElement("span");
         span.className = "chord-pill";
         span.textContent = seg.chord;
-        span.title = `${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s`;
+        const rn = romanNumeral(seg.root, seg.quality, keyRoot, keyQuality);
+        const scale = describeScale(seg.root, seg.quality, keyRoot, keyQuality);
+        const lines = [
+          `${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s`,
+          rn ? `Function: ${rn}` : "Out of key",
+          `Scale used for fills: ${scale}`,
+        ];
+        span.title = lines.join("\n");
         return span;
       }),
       ...(moreCount > 0 ? [(() => {
