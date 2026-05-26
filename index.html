@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Honkytonk Stems — BPM, Chords &amp; Country Accompaniment</title>
+  <meta name="description" content="Upload an MP3 to detect BPM and chords, then generate downloadable country-style accompaniment stems: drums, bass, piano, and pedal steel." />
+  <meta property="og:title" content="Honkytonk Stems" />
+  <meta property="og:description" content="Upload an MP3 to detect BPM and chords, then generate and download accompanying country music instrument tracks." />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Honkytonk Stems" />
+  <meta name="twitter:description" content="Upload an MP3 to detect BPM and chords, then generate and download accompanying country music instrument tracks." />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="page">
+
+    <header class="header">
+      <div class="eyebrow">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M6 12c0-1.7.7-3.2 1.8-4.2"/>
+          <circle cx="12" cy="12" r="2"/>
+          <path d="M18 12c0 1.7-.7 3.2-1.8 4.2"/>
+        </svg>
+        Country Stem Studio
+      </div>
+      <h1 class="display">Honkytonk<span class="accent">Stems</span></h1>
+      <p class="tagline">
+        Upload an MP3. We'll detect the tempo and chords, then conjure a country band —
+        drums, bass, piano, and pedal steel — you can download as separate WAV stems.
+      </p>
+    </header>
+
+    <section class="card">
+      <input id="file-input" type="file" accept="audio/mpeg,audio/mp3,audio/*" hidden />
+
+      <button id="dropzone" type="button" class="dropzone">
+        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3v12"/>
+          <path d="m17 8-5-5-5 5"/>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        </svg>
+        <div class="heading">Drop an MP3 here</div>
+        <div class="sub">or click to choose a file (processed locally, never uploaded)</div>
+      </button>
+
+      <div id="panel" class="panel hidden">
+        <div class="file-row">
+          <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+          </svg>
+          <div id="file-name" class="file-name"></div>
+          <button id="new-file-btn" type="button" class="btn">New file</button>
+        </div>
+
+        <div id="progress" class="progress hidden">
+          <div id="progress-label" class="progress-label">
+            <div id="progress-spinner" class="spinner" aria-hidden="true"></div>
+            <span></span>
+          </div>
+          <div id="progress-bar" class="progress-bar"><div></div></div>
+        </div>
+
+        <div id="error-msg" class="error-msg hidden" role="alert"></div>
+
+        <div id="stats" class="stats hidden">
+          <div class="stat"><div class="value" id="stat-bpm"></div><div class="label">BPM</div></div>
+          <div class="stat"><div class="value" id="stat-key"></div><div class="label">Key (est.)</div></div>
+          <div class="stat"><div class="value" id="stat-chords"></div><div class="label">Chords</div></div>
+        </div>
+
+        <div id="chord-section" class="hidden">
+          <div class="section-label">Chord progression</div>
+          <div id="chord-list" class="chord-list"></div>
+        </div>
+
+        <div id="stems-section" class="hidden">
+          <div class="section-label">Generated stems</div>
+          <div id="stems-grid" class="stems"></div>
+        </div>
+      </div>
+    </section>
+
+    <p class="footnote">
+      Chord detection is best-effort (chroma-based templates). Stems are synthesized
+      sketches — drop them into your DAW alongside the original to build from.
+    </p>
+
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
