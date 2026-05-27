@@ -6,47 +6,88 @@ import {
   analyzeSong,
   renderAllStems,
   STEM_LABELS,
-  describeGroove,
-  describeScale,
-  romanNumeral,
-  AVAILABLE_GROOVES,
 } from "./audio.js";
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
+// Lifecycle phases the app moves through.
+//   empty       — no file loaded; show dropzone
+//   decoding    — file loaded, audio is being decoded
+//   analyzing   — BPM/key/chords being detected
+//   reviewing   — analysis done; waiting for user to confirm and click Generate
+//   rendering   — synthesizing stems
+//   ready       — stems exist; mixer visible
 const state = {
   filename: null,
-  busy: false,
+  phase: "empty",
   progress: 0,
   status: "",
-  analysis: null,           // { bpm, key, chords, duration } | null
-  groove: null,             // { key, label, swing } | null
-  feel: "auto",             // current feel selection ("auto" | "ballad" | ...)
+
+  // Detected analysis (what the analyzer returned, unmodified).
+  analysis: null,           // { bpm, key, keyRoot, keyQuality, chords, beats, duration }
+
+  // User overrides applied on top of the detected analysis.
+  bpmOverride: null,        // number | null
+  keyRootOverride: null,    // 0..11 | null
+  keyQualityOverride: null, // "maj"|"min" | null
+
+  // Most-recent render's "frozen" values. Used to detect staleness.
+  lastRender: null,         // { bpm, keyRoot, keyQuality } | null
+
   stems: [],                // [{ name, blob, url, buffer }]
-  originalBuffer: null,     // AudioBuffer of source file
+  originalBuffer: null,
   errorMsg: "",
 
   // Mixer
   playing: false,
-  playheadSec: 0,           // last known playhead (seconds)
-  durationSec: 0,           // mix length (== rendered stems duration)
+  playheadSec: 0,
+  durationSec: 0,
   tracks: makeDefaultTracks(),
-  offsetMs: 0,              // global stems offset relative to original
 };
+
+// Convenience: "busy" means we shouldn't accept user input that triggers work.
+function isBusy() {
+  return state.phase === "decoding" || state.phase === "analyzing" || state.phase === "rendering";
+}
+
+// Effective values shown in the UI and used when generating: detected values
+// overridden by any user edits.
+function effectiveBpm() {
+  if (state.bpmOverride != null) return state.bpmOverride;
+  return state.analysis?.bpm ?? 0;
+}
+function effectiveKeyRoot() {
+  return state.keyRootOverride ?? state.analysis?.keyRoot ?? 0;
+}
+function effectiveKeyQuality() {
+  return state.keyQualityOverride ?? state.analysis?.keyQuality ?? "maj";
+}
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+function effectiveKeyLabel() {
+  return NOTE_NAMES[effectiveKeyRoot()] + (effectiveKeyQuality() === "min" ? "m" : "");
+}
+
+// Is the current set of stems out of date relative to the user's choices?
+function isStale() {
+  if (!state.lastRender) return false;     // no stems yet, nothing to be stale
+  return (
+    state.lastRender.bpm        !== effectiveBpm()        ||
+    state.lastRender.keyRoot    !== effectiveKeyRoot()    ||
+    state.lastRender.keyQuality !== effectiveKeyQuality()
+  );
+}
 
 function makeDefaultTracks() {
   return {
-    original:   { volume: 0.85, mute: false, solo: false },
-    drums:      { volume: 0.85, mute: false, solo: false },
-    bass:       { volume: 0.85, mute: false, solo: false },
-    piano:      { volume: 0.8,  mute: false, solo: false },
-    pedalSteel: { volume: 0.8,  mute: false, solo: false },
+    original: { volume: 0.85, mute: false, solo: false },
+    drums:    { volume: 0.85, mute: false, solo: false },
+    bass:     { volume: 0.85, mute: false, solo: false },
   };
 }
 
-const TRACK_ORDER = ["original", "drums", "bass", "piano", "pedalSteel"];
+const TRACK_ORDER = ["original", "drums", "bass"];
 const TRACK_LABELS = { original: "Original", ...STEM_LABELS };
 
 // ---------------------------------------------------------------------------
@@ -122,30 +163,11 @@ function startAllSources(offsetSec) {
   for (const id of TRACK_ORDER) {
     const buffer = getTrackBuffer(id);
     if (!buffer) continue;
-
-    // The "original" track plays from `offsetSec` directly.
-    // Stems play offset by the user's stems-offset nudge.
-    let trackOffset = offsetSec;
-    if (id !== "original") {
-      // stems-offset nudges the stems relative to original: positive = stems later
-      // so when the user picks the playhead at offsetSec in the original, the
-      // matching position inside the stem buffer is offsetSec - offsetMs/1000.
-      trackOffset = offsetSec - state.offsetMs / 1000;
-    }
-    // Skip if outside the buffer
-    if (trackOffset >= buffer.duration) continue;
-    if (trackOffset < 0) {
-      // schedule the source to start later by |trackOffset| seconds
-      const src = new AudioBufferSourceNode(audioCtx, { buffer });
-      src.connect(trackNodes[id].gain);
-      src.start(ctxStart + Math.abs(trackOffset), 0);
-      trackNodes[id].source = src;
-    } else {
-      const src = new AudioBufferSourceNode(audioCtx, { buffer });
-      src.connect(trackNodes[id].gain);
-      src.start(ctxStart, trackOffset);
-      trackNodes[id].source = src;
-    }
+    if (offsetSec >= buffer.duration) continue;
+    const src = new AudioBufferSourceNode(audioCtx, { buffer });
+    src.connect(trackNodes[id].gain);
+    src.start(ctxStart, offsetSec);
+    trackNodes[id].source = src;
   }
 
   scheduledStartTime = ctxStart;
@@ -228,10 +250,14 @@ const els = {
   spinner:          $("#progress-spinner"),
 
   stats:            $("#stats"),
-  statBpm:          $("#stat-bpm"),
-  statKey:          $("#stat-key"),
+  statBpmInput:     $("#stat-bpm-input"),
+  statKeyRoot:      $("#stat-key-root"),
+  statKeyQuality:   $("#stat-key-quality"),
   statChords:       $("#stat-chords"),
-  feelSelect:       $("#feel-select"),
+
+  generateSection:  $("#generate-section"),
+  generateBtn:      $("#generate-btn"),
+  staleIndicator:   $("#stale-indicator"),
 
   chordSection:     $("#chord-section"),
   chordList:        $("#chord-list"),
@@ -242,8 +268,6 @@ const els = {
   transportTime:    $("#transport-time"),
   transportTotal:   $("#transport-total"),
   transportSeek:    $("#transport-seek"),
-  offsetSlider:     $("#offset-slider"),
-  offsetLabel:      $("#offset-label"),
   downloadAllBtn:   $("#download-all"),
 
   errorMsg:         $("#error-msg"),
@@ -254,61 +278,76 @@ const els = {
 // ---------------------------------------------------------------------------
 
 function render() {
-  // Dropzone vs panel
-  if (state.filename) {
-    els.dropzone.classList.add("hidden");
-    els.panel.classList.remove("hidden");
-  } else {
+  const phase = state.phase;
+  const busy = isBusy();
+
+  // Dropzone vs the rest of the panel.
+  if (phase === "empty") {
     els.dropzone.classList.remove("hidden");
     els.panel.classList.add("hidden");
+    return;        // nothing else to render before a file is loaded
   }
+  els.dropzone.classList.add("hidden");
+  els.panel.classList.remove("hidden");
 
   els.fileName.textContent = state.filename ?? "";
-  els.newFileBtn.disabled = state.busy;
-  els.newFileBtn.style.visibility = state.busy ? "hidden" : "visible";
+  els.newFileBtn.disabled = busy;
+  els.newFileBtn.style.visibility = busy ? "hidden" : "visible";
 
-  const progressVisible = (state.busy || state.progress < 1) && !!state.status;
+  // Progress / spinner / status text
+  const progressVisible = busy && !!state.status;
   els.progress.classList.toggle("hidden", !progressVisible);
-  // Find the dedicated <span> child so this is robust against whitespace nodes
-  // between siblings.
   const statusSpan = els.progressLabel.querySelector("span");
   if (statusSpan) statusSpan.textContent = state.status;
-  els.spinner.style.display = state.busy ? "" : "none";
+  els.spinner.style.display = busy ? "" : "none";
   els.progressBar.style.width = `${Math.round(state.progress * 100)}%`;
 
   els.errorMsg.textContent = state.errorMsg;
   els.errorMsg.classList.toggle("hidden", !state.errorMsg);
 
-  if (state.analysis) {
+  // Stats are visible from `reviewing` onward.
+  const hasAnalysis = !!state.analysis;
+  if (hasAnalysis) {
     els.stats.classList.remove("hidden");
-    els.statBpm.textContent    = String(state.analysis.bpm);
-    els.statKey.textContent    = state.analysis.key;
+
+    // Only overwrite the BPM input value when the input isn't currently focused —
+    // otherwise we'd clobber the user's keystrokes mid-typing.
+    if (document.activeElement !== els.statBpmInput) {
+      els.statBpmInput.value = String(effectiveBpm());
+    }
+    els.statBpmInput.disabled = busy;
+
+    populateKeySelects();
+    els.statKeyRoot.disabled    = busy;
+    els.statKeyQuality.disabled = busy;
+
     els.statChords.textContent = String(state.analysis.chords.length);
-    populateFeelSelect();
   } else {
     els.stats.classList.add("hidden");
   }
 
-  if (state.analysis && state.analysis.chords.length > 0) {
+  // Generate / Regenerate button is visible while reviewing or after we have stems.
+  const showGenerate = hasAnalysis && (phase === "reviewing" || phase === "ready" || phase === "rendering");
+  els.generateSection.classList.toggle("hidden", !showGenerate);
+  if (showGenerate) {
+    const hasStems = state.stems.length > 0;
+    els.generateBtn.textContent = hasStems ? "Regenerate stems" : "Generate stems";
+    els.generateBtn.disabled = busy;
+    els.staleIndicator.classList.toggle("hidden", !(hasStems && isStale()));
+  }
+
+  // Chord progression is visible from `reviewing` onward (re-uses detected chords).
+  if (hasAnalysis && state.analysis.chords.length > 0) {
     els.chordSection.classList.remove("hidden");
     const chords = state.analysis.chords;
     const shown = chords.slice(0, 64);
     const moreCount = chords.length - shown.length;
-    const keyRoot = state.analysis.keyRoot;
-    const keyQuality = state.analysis.keyQuality;
     els.chordList.replaceChildren(
       ...shown.map((seg) => {
         const span = document.createElement("span");
         span.className = "chord-pill";
         span.textContent = seg.chord;
-        const rn = romanNumeral(seg.root, seg.quality, keyRoot, keyQuality);
-        const scale = describeScale(seg.root, seg.quality, keyRoot, keyQuality);
-        const lines = [
-          `${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s`,
-          rn ? `Function: ${rn}` : "Out of key",
-          `Scale used for fills: ${scale}`,
-        ];
-        span.title = lines.join("\n");
+        span.title = `${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s`;
         return span;
       }),
       ...(moreCount > 0 ? [(() => {
@@ -322,8 +361,8 @@ function render() {
     els.chordSection.classList.add("hidden");
   }
 
-  // Mixer
-  if (state.stems.length > 0 && state.originalBuffer) {
+  // Mixer only after we actually have stems (phase: ready).
+  if (state.stems.length > 0 && state.originalBuffer && phase === "ready") {
     els.mixerSection.classList.remove("hidden");
     renderMixerTracks();
     updateTransportUi();
@@ -332,25 +371,21 @@ function render() {
   }
 }
 
-function populateFeelSelect() {
-  // Rebuild options if structure differs from what's there now.
-  const sel = els.feelSelect;
-  if (sel.options.length !== AVAILABLE_GROOVES.length) {
-    sel.replaceChildren(...AVAILABLE_GROOVES.map((g) => {
-      const opt = document.createElement("option");
-      opt.value = g.key;
-      opt.textContent = g.label;
-      return opt;
+function populateKeySelects() {
+  // Root select gets all 12 pitch classes once.
+  if (els.statKeyRoot.options.length === 0) {
+    els.statKeyRoot.replaceChildren(...NOTE_NAMES.map((n, i) => {
+      const o = document.createElement("option");
+      o.value = String(i);
+      o.textContent = n;
+      return o;
     }));
   }
-  // Annotate the "Auto" label with what it would pick for this BPM.
-  if (state.analysis) {
-    const autoGroove = describeGroove(state.analysis.bpm, "auto");
-    sel.options[0].textContent = `Auto (${autoGroove.label})`;
-  }
-  sel.value = state.feel;
-  sel.disabled = state.busy;
+  els.statKeyRoot.value    = String(effectiveKeyRoot());
+  els.statKeyQuality.value = effectiveKeyQuality();
 }
+
+
 
 function renderMixerTracks() {
   els.mixerTracks.replaceChildren(...TRACK_ORDER.map(trackRow));
@@ -452,7 +487,6 @@ function updateTransportUi() {
     els.transportSeek.max = String(state.durationSec);
     els.transportSeek.value = String(state.playheadSec);
   }
-  els.offsetLabel.textContent = `${state.offsetMs > 0 ? "+" : ""}${state.offsetMs} ms`;
 }
 
 function formatTime(s) {
@@ -484,73 +518,26 @@ function clearPreviousStems() {
   previousStemUrls = [];
 }
 
-// Synthesize stems from the current analysis using the current feel.
-// Used both as the second phase of handleFile() and standalone when the user
-// changes the feel selector.
-async function renderStemsFromAnalysis() {
-  const analysis = state.analysis;
-  if (!analysis) return;
-  const renderDuration = Math.min(analysis.duration, 120);
-  const stems = await renderAllStems(
-    analysis,
-    renderDuration,
-    (stemName, i, n) => {
-      state.progress = (i + 0.5) / n;
-      state.status = `Rendering ${STEM_LABELS[stemName] ?? stemName}…`;
-      render();
-    },
-    state.feel,
-  );
-  state.stems = stems;
-  previousStemUrls = stems.map((s) => s.url);
-  state.durationSec = renderDuration;
-  state.groove = describeGroove(analysis.bpm, state.feel);
-}
-
-async function rerenderStemsWithCurrentFeel() {
-  if (!state.analysis || state.busy) return;
-  const wasPlaying = state.playing;
-  const savedPlayhead = state.playheadSec;
-  pause();
-  clearPreviousStems();
-  state.stems = [];
-  state.busy = true;
-  state.errorMsg = "";
-  state.status = "Rendering stems…";
-  state.progress = 0;
-  render();
-  try {
-    await renderStemsFromAnalysis();
-    state.status = "Done";
-    state.progress = 1;
-  } catch (err) {
-    console.error(err);
-    state.errorMsg = `Error: ${err && err.message ? err.message : err}`;
-    state.status = "";
-  } finally {
-    state.busy = false;
-    state.playheadSec = Math.min(savedPlayhead, state.durationSec);
-    render();
-    if (wasPlaying) play();
-  }
-}
-
+// Step 1 of the flow: load + decode + analyze. Stops at the "reviewing" phase;
+// the user must then click Generate to synthesize stems.
 async function handleFile(file) {
   pause();
   clearPreviousStems();
 
+  // Reset to a clean state.
   state.filename = file.name;
-  state.busy = true;
+  state.phase = "decoding";
   state.errorMsg = "";
   state.analysis = null;
-  state.groove = null;
+  state.bpmOverride = null;
+  state.keyRootOverride = null;
+  state.keyQualityOverride = null;
+  state.lastRender = null;
   state.stems = [];
   state.originalBuffer = null;
   state.playheadSec = 0;
   state.durationSec = 0;
   state.tracks = makeDefaultTracks();
-  state.offsetMs = 0;
-  if (els.offsetSlider) els.offsetSlider.value = "0";
   state.status = "Decoding audio…";
   state.progress = 0.02;
   render();
@@ -561,25 +548,84 @@ async function handleFile(file) {
     const buffer = await audioCtx.decodeAudioData(arr.slice(0));
     state.originalBuffer = buffer;
 
+    state.phase = "analyzing";
+    render();
+
     const analysis = await analyzeSong(buffer, (p, msg) => {
       state.progress = p; state.status = msg; render();
     });
     state.analysis = analysis;
-    state.groove = describeGroove(analysis.bpm, state.feel);
-    state.status = "Rendering stems…";
-    state.progress = 0;
-    render();
 
-    await renderStemsFromAnalysis();
-    state.status = "Done";
-    state.progress = 1;
+    // Stop here. User reviews / corrects, then clicks Generate.
+    state.phase = "reviewing";
+    state.status = "";
+    state.progress = 0;
   } catch (err) {
     console.error(err);
     state.errorMsg = `Error: ${err && err.message ? err.message : err}`;
     state.status = "";
+    state.phase = state.analysis ? "reviewing" : "empty";
   } finally {
-    state.busy = false;
     render();
+  }
+}
+
+// Step 2 of the flow: synthesize stems using the user's (possibly edited)
+// BPM and key. Triggered exclusively by the Generate button.
+async function handleGenerate() {
+  if (!state.analysis || isBusy()) return;
+
+  const wasPlaying = state.playing;
+  const savedPlayhead = state.playheadSec;
+  pause();
+  clearPreviousStems();
+  state.stems = [];
+
+  state.phase = "rendering";
+  state.errorMsg = "";
+  state.status = "Rendering stems…";
+  state.progress = 0;
+  render();
+
+  // Build a synthetic analysis object reflecting the user's overrides.
+  const synAnalysis = {
+    ...state.analysis,
+    bpm:        effectiveBpm(),
+    keyRoot:    effectiveKeyRoot(),
+    keyQuality: effectiveKeyQuality(),
+  };
+
+  try {
+    const renderDuration = Math.min(synAnalysis.duration, 120);
+    const stems = await renderAllStems(
+      synAnalysis,
+      renderDuration,
+      (stemName, i, n) => {
+        state.progress = (i + 0.5) / n;
+        state.status = `Rendering ${STEM_LABELS[stemName] ?? stemName}…`;
+        render();
+      },
+    );
+    state.stems = stems;
+    previousStemUrls = stems.map((s) => s.url);
+    state.durationSec = renderDuration;
+    state.lastRender = {
+      bpm: synAnalysis.bpm,
+      keyRoot: synAnalysis.keyRoot,
+      keyQuality: synAnalysis.keyQuality,
+    };
+    state.status = "Done";
+    state.progress = 1;
+    state.phase = "ready";
+  } catch (err) {
+    console.error(err);
+    state.errorMsg = `Error: ${err && err.message ? err.message : err}`;
+    state.status = "";
+    state.phase = "reviewing";
+  } finally {
+    state.playheadSec = Math.min(savedPlayhead, state.durationSec);
+    render();
+    if (wasPlaying && state.stems.length > 0) play();
   }
 }
 
@@ -638,26 +684,37 @@ els.transportSeek.addEventListener("input", () => {
   els.transportTime.textContent = formatTime(state.playheadSec);
 });
 
-els.offsetSlider.addEventListener("input", () => {
-  state.offsetMs = parseInt(els.offsetSlider.value, 10);
-  els.offsetLabel.textContent = `${state.offsetMs > 0 ? "+" : ""}${state.offsetMs} ms`;
-  // If currently playing, restart from current playhead with new offset
-  if (state.playing) {
-    const t = currentPlayheadSec();
-    pause();
-    state.playheadSec = t;
-    play();
-  }
-});
-
 els.downloadAllBtn.addEventListener("click", downloadAll);
 
-els.feelSelect.addEventListener("change", () => {
-  const newFeel = els.feelSelect.value;
-  if (newFeel === state.feel) return;
-  state.feel = newFeel;
-  // Re-render stems only — no re-analysis. Analysis (bpm/chords) doesn't change.
-  rerenderStemsWithCurrentFeel();
+// Generate / Regenerate button — the only path that triggers synthesis.
+els.generateBtn.addEventListener("click", () => handleGenerate());
+
+// BPM edit: update the override on every change. Don't re-render automatically.
+// Invalid values fall back to the detected BPM.
+function handleBpmEdit() {
+  const raw = els.statBpmInput.value.trim();
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 40 && n <= 220) {
+    state.bpmOverride = (state.analysis && n === state.analysis.bpm) ? null : n;
+  } else {
+    // Empty / out-of-range: fall back to detected BPM until valid.
+    state.bpmOverride = null;
+  }
+  render();
+}
+els.statBpmInput.addEventListener("input", handleBpmEdit);
+els.statBpmInput.addEventListener("change", handleBpmEdit);
+
+// Key edits.
+els.statKeyRoot.addEventListener("change", () => {
+  const r = parseInt(els.statKeyRoot.value, 10);
+  state.keyRootOverride = (state.analysis && r === state.analysis.keyRoot) ? null : r;
+  render();
+});
+els.statKeyQuality.addEventListener("change", () => {
+  const q = els.statKeyQuality.value;
+  state.keyQualityOverride = (state.analysis && q === state.analysis.keyQuality) ? null : q;
+  render();
 });
 
 // Keyboard shortcut: space toggles play/pause when the mixer is visible.

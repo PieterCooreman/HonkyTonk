@@ -11,8 +11,6 @@ const RENDER_SAMPLE_RATE = 44100;
 export const STEM_LABELS = {
   drums: "Drums",
   bass: "Bass",
-  piano: "Piano",
-  pedalSteel: "Pedal Steel",
 };
 
 // ----------------------------------------------------------------------------
@@ -553,25 +551,24 @@ export function encodeWav(buffer) {
   return new Blob([ab], { type: "audio/wav" });
 }
 
+
 // ============================================================================
-// SYNTHESIS UTILITIES
+// SYNTHESIS — drums + bass only, dead-quantized to the detected beat grid.
+//
+// Design rules:
+//   - Every hit lands on a beat from the analyzer's `beats` array.
+//   - No timing jitter, no swing, no fills, no humanization. The output is
+//     trivially quantizable in any DAW.
+//   - Each bar = 4 beats. Pattern repeats identically every bar.
+//   - No piano, no pedal steel. Just kick / snare / closed hat + bass roots.
 // ============================================================================
 
-function makeRng(seed = 1234) {
-  let s = seed >>> 0;
-  return function rng() {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0x100000000;
-  };
-}
-function jitter(rng, amount) { return (rng() * 2 - 1) * amount; }
 function midiToHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
 
-function safeTime(t, totalDuration) {
-  return Math.min(Math.max(0, t), Math.max(0.001, totalDuration - 0.001));
-}
-
-function makeNoiseBuffer(ctx, seconds = 1) {
+function makeNoiseBuffer(ctx, seconds = 0.4) {
+  // Shared, short white-noise buffer used by snare + hi-hat. Generating once
+  // and re-using is critical for render speed — calling createBuffer per hit
+  // for hundreds of hits is what made the previous renderer crawl.
   const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
   const buf = ctx.createBuffer(1, len, ctx.sampleRate);
   const data = buf.getChannelData(0);
@@ -579,755 +576,159 @@ function makeNoiseBuffer(ctx, seconds = 1) {
   return buf;
 }
 
-// Choose triad voicing close to previous voicing — for smooth voice leading.
-function voiceLedTriad(rootPc, quality, previousVoicing) {
-  const third = quality === "maj" ? 4 : 3;
-  const intervals = [0, third, 7];
-  if (!previousVoicing || previousVoicing.length === 0) {
-    const base = 12 * 5 + rootPc;
-    return intervals.map((iv) => base + iv);
-  }
-  return intervals.map((iv) => {
-    const pc = (rootPc + iv) % 12;
-    let bestMidi = 12 * 5 + pc;
-    let bestDist = Infinity;
-    for (let oct = 3; oct <= 6; oct++) {
-      const m = 12 * (oct + 1) + pc;
-      const d = Math.min(...previousVoicing.map((p) => Math.abs(p - m)));
-      if (d < bestDist) { bestDist = d; bestMidi = m; }
-    }
-    return bestMidi;
-  }).sort((a, b) => a - b);
-}
-
-// ============================================================================
-// SCALE HELPERS
-// ============================================================================
-
-// Pick the country-idiomatic scale for a given chord, given the song's key.
-// `role` is what we're going to do with it:
-//   "walk"   — bass walking line. Pentatonic + 6 + b7. No half-steps under bass.
-//   "fill"   — piano/lead fill ending on the next chord. Hybrid country scale.
-//   "lick"   — quick embellishment. Mixolydian for major, Dorian for minor.
-//   "pad"    — sustained pad. Plain diatonic, no blues notes.
+// ----- Drum voices -----------------------------------------------------------
 //
-// Returns an array of pitch classes (0..11). Sorted ascending mod 12.
-//
-// The Nashville rule of thumb:
-//   over the I (tonic major)  → hybrid country / mixolydian
-//   over the IV (subdominant) → mixolydian (its own b7 is the I's natural 7
-//                                — sounds great)
-//   over the V (dominant)     → MAJOR, not mixolydian. We want the leading
-//                                tone (the key's natural 7) to pull back to I.
-//   over the vi (rel-minor)   → Dorian
-//   over any other minor      → Dorian
-function scaleForChord(chordRoot, chordQuality, keyRoot, keyQuality, role = "fill") {
-  const degreeFromKey = (chordRoot - keyRoot + 12) % 12;
-  const isV  = keyQuality === "maj" && degreeFromKey === 7;
-  const isIV = keyQuality === "maj" && degreeFromKey === 5;
-  const isI  = degreeFromKey === 0 && chordQuality === keyQuality;
+// Each voice schedules a small set of WebAudio nodes for a single hit. No
+// effects bus, no waveshaper, no filters on the master — that adds up across
+// hundreds of hits.
 
-  let scalePattern;
-  if (role === "walk") {
-    // Bass walks: minor pentatonic-plus-6 over minor, major-pentatonic-plus-6-b7
-    // over major. Avoids half-steps in the low end.
-    scalePattern = chordQuality === "min"
-      ? [0, 3, 5, 7, 9, 10]    // R b3 4 5 6 b7 — minor blues walk
-      : [0, 2, 4, 7, 9, 10];   // R 2 3 5 6 b7 — country major walk
-  } else if (chordQuality === "min") {
-    scalePattern = SCALES.dorian;
-  } else if (isV) {
-    // V chord — major's mixolydian gives the b7 ("twang") plus the chord's
-    // own leading tone (which is the key's 2nd) and access to the resolution.
-    scalePattern = SCALES.mixolydian;
-  } else if (role === "pad") {
-    scalePattern = SCALES.major;
-  } else if (role === "lick") {
-    scalePattern = SCALES.mixolydian;
-  } else {
-    // "fill" or default — the hybrid country scale (major + b3 + b7).
-    scalePattern = SCALES.hybridCountry;
-  }
-  return scalePattern.map((d) => (chordRoot + d) % 12);
+function playKick(ctx, dest, t) {
+  const osc  = new OscillatorNode(ctx, { type: "sine", frequency: 150 });
+  const gain = new GainNode(ctx, { gain: 0 });
+  osc.connect(gain).connect(dest);
+  osc.frequency.setValueAtTime(150, t);
+  osc.frequency.exponentialRampToValueAtTime(48, t + 0.18);
+  gain.gain.setValueAtTime(1e-4, t);
+  gain.gain.exponentialRampToValueAtTime(0.95, t + 0.002);
+  gain.gain.exponentialRampToValueAtTime(1e-4, t + 0.22);
+  osc.start(t);
+  osc.stop(t + 0.24);
 }
 
-// Human-readable name for the scale picked above. Used for tooltips on chord pills.
-export function describeScale(chordRoot, chordQuality, keyRoot, keyQuality) {
-  const degreeFromKey = (chordRoot - keyRoot + 12) % 12;
-  const isV = keyQuality === "maj" && degreeFromKey === 7;
-  if (chordQuality === "min") return "Dorian";
-  if (isV) return "Mixolydian";
-  return "Hybrid country";
-}
+function playSnare(ctx, dest, noiseBuf, t) {
+  // Noise burst (the "splash") + a short tonal body.
+  const src  = new AudioBufferSourceNode(ctx, { buffer: noiseBuf });
+  const hpf  = new BiquadFilterNode(ctx, { type: "highpass", frequency: 1800, Q: 0.7 });
+  const ngn  = new GainNode(ctx, { gain: 0 });
+  src.connect(hpf).connect(ngn).connect(dest);
+  ngn.gain.setValueAtTime(1e-4, t);
+  ngn.gain.exponentialRampToValueAtTime(0.45, t + 0.0015);
+  ngn.gain.exponentialRampToValueAtTime(1e-4, t + 0.15);
+  src.start(t);
+  src.stop(t + 0.16);
 
-// Nashville-style Roman numeral analysis for display: I, ii, iii, IV, V, vi, etc.
-// Falls back to "n/c" (no chord function) for out-of-key chords.
-export function romanNumeral(chordRoot, chordQuality, keyRoot, keyQuality) {
-  const degree = (chordRoot - keyRoot + 12) % 12;
-  // Map of semitones-from-key-tonic to (Roman major, Roman minor) labels.
-  // Indices align with the major-scale degrees in keyQuality === "maj".
-  const major = ["I", null, "ii", null, "iii", "IV", null, "V", null, "vi", null, "vii°"];
-  const minor = ["i", null, "ii°", "III", null, "iv", null, "v", "VI", null, "VII", null];
-  const labels = keyQuality === "maj" ? major : minor;
-  let label = labels[degree];
-  if (!label) return "";  // out-of-key — leave blank
-  // Force quality casing to match the actual detected chord. e.g. a major V
-  // detected as minor would show "v" instead of "V".
-  if (chordQuality === "min" && /^[A-Z]+$/.test(label)) label = label.toLowerCase();
-  if (chordQuality === "maj" && /^[a-z]+$/.test(label)) label = label.toUpperCase();
-  return label;
-}
-
-// Find the closest MIDI note in a given pitch-class set to a target MIDI note.
-function nearestInScale(targetMidi, scalePcs) {
-  let best = targetMidi, bestDist = Infinity;
-  for (let off = -6; off <= 6; off++) {
-    const m = targetMidi + off;
-    if (scalePcs.includes(m % 12 < 0 ? (m % 12) + 12 : m % 12)) {
-      const d = Math.abs(off);
-      if (d < bestDist) { bestDist = d; best = m; }
-    }
-  }
-  return best;
-}
-
-// Walking-bass line from chordRoot to nextChordRoot through `steps` notes,
-// staying within the given scale where possible.
-function walkingLine(fromMidi, toMidi, steps, scalePcs) {
-  const line = [fromMidi];
-  if (steps <= 1) return line;
-  // Move stepwise toward the target. Each step pick the nearest scale tone in the
-  // right direction. Final step lands on `toMidi`.
-  for (let i = 1; i < steps; i++) {
-    const t = fromMidi + ((toMidi - fromMidi) * i) / steps;
-    const candidate = nearestInScale(Math.round(t), scalePcs);
-    line.push(candidate);
-  }
-  line[line.length - 1] = toMidi;
-  return line;
-}
-
-// ============================================================================
-// VOICES
-// ============================================================================
-
-function playKick(ctx, dest, t, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const osc = new OscillatorNode(ctx, { type: "sine", frequency: 150 });
-  const sub = new OscillatorNode(ctx, { type: "sine", frequency: 60 });
-  const g = new GainNode(ctx, { gain: 0 });
-  const sg = new GainNode(ctx, { gain: 0 });
-  osc.connect(g).connect(dest);
-  sub.connect(sg).connect(dest);
-  osc.frequency.setValueAtTime(150, start);
-  osc.frequency.exponentialRampToValueAtTime(48, start + 0.18);
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(0.95 * velocity, start + 0.002);
-  g.gain.exponentialRampToValueAtTime(1e-4, start + 0.22);
-  sg.gain.setValueAtTime(1e-4, start);
-  sg.gain.exponentialRampToValueAtTime(0.55 * velocity, start + 0.005);
-  sg.gain.exponentialRampToValueAtTime(1e-4, start + 0.18);
-  osc.start(start); sub.start(start);
-  osc.stop(start + 0.24); sub.stop(start + 0.2);
-}
-
-function playFilteredNoise(ctx, dest, noiseBuf, t, durSec, peakGain, filterType, filterFreq, Q = 0.7) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const src = new AudioBufferSourceNode(ctx, { buffer: noiseBuf });
-  const filt = new BiquadFilterNode(ctx, { type: filterType, frequency: filterFreq, Q });
-  const g = new GainNode(ctx, { gain: 0 });
-  src.connect(filt).connect(g).connect(dest);
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(peakGain, start + 0.0015);
-  g.gain.exponentialRampToValueAtTime(1e-4, start + durSec);
-  src.start(start);
-  src.stop(start + durSec + 0.01);
-}
-
-function playSnare(ctx, dest, noiseBuf, t, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  playFilteredNoise(ctx, dest, noiseBuf, start, 0.18, 0.45 * velocity, "highpass", 1800);
-  playFilteredNoise(ctx, dest, noiseBuf, start, 0.10, 0.20 * velocity, "bandpass", 4000, 1.2);
   const body = new OscillatorNode(ctx, { type: "triangle", frequency: 220 });
-  const bg = new GainNode(ctx, { gain: 0 });
+  const bg   = new GainNode(ctx, { gain: 0 });
   body.connect(bg).connect(dest);
-  body.frequency.setValueAtTime(220, start);
-  body.frequency.exponentialRampToValueAtTime(140, start + 0.08);
-  bg.gain.setValueAtTime(1e-4, start);
-  bg.gain.exponentialRampToValueAtTime(0.28 * velocity, start + 0.002);
-  bg.gain.exponentialRampToValueAtTime(1e-4, start + 0.13);
-  body.start(start);
-  body.stop(start + 0.15);
+  body.frequency.setValueAtTime(220, t);
+  body.frequency.exponentialRampToValueAtTime(140, t + 0.08);
+  bg.gain.setValueAtTime(1e-4, t);
+  bg.gain.exponentialRampToValueAtTime(0.28, t + 0.002);
+  bg.gain.exponentialRampToValueAtTime(1e-4, t + 0.13);
+  body.start(t);
+  body.stop(t + 0.15);
 }
 
-function playRim(ctx, dest, t, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const osc = new OscillatorNode(ctx, { type: "square", frequency: 900 });
-  const bpf = new BiquadFilterNode(ctx, { type: "bandpass", frequency: 1500, Q: 6 });
-  const g = new GainNode(ctx, { gain: 0 });
-  osc.connect(bpf).connect(g).connect(dest);
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(0.35 * velocity, start + 0.001);
-  g.gain.exponentialRampToValueAtTime(1e-4, start + 0.03);
-  osc.start(start);
-  osc.stop(start + 0.04);
+function playClosedHat(ctx, dest, noiseBuf, t) {
+  const src  = new AudioBufferSourceNode(ctx, { buffer: noiseBuf });
+  const hpf  = new BiquadFilterNode(ctx, { type: "highpass", frequency: 7000, Q: 0.7 });
+  const gn   = new GainNode(ctx, { gain: 0 });
+  src.connect(hpf).connect(gn).connect(dest);
+  gn.gain.setValueAtTime(1e-4, t);
+  gn.gain.exponentialRampToValueAtTime(0.16, t + 0.0015);
+  gn.gain.exponentialRampToValueAtTime(1e-4, t + 0.05);
+  src.start(t);
+  src.stop(t + 0.06);
 }
 
-function playHat(ctx, dest, noiseBuf, t, velocity = 1) {
-  playFilteredNoise(ctx, dest, noiseBuf, t, 0.05, 0.16 * velocity, "highpass", 7000);
-}
+// ----- Bass voice ------------------------------------------------------------
 
-function playBrush(ctx, dest, noiseBuf, t, durSec, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const src = new AudioBufferSourceNode(ctx, { buffer: noiseBuf });
-  const bpf = new BiquadFilterNode(ctx, { type: "bandpass", frequency: 2500, Q: 0.5 });
-  const g = new GainNode(ctx, { gain: 0 });
-  src.connect(bpf).connect(g).connect(dest);
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(0.10 * velocity, start + 0.03);
-  g.gain.exponentialRampToValueAtTime(0.06 * velocity, start + durSec * 0.6);
-  g.gain.exponentialRampToValueAtTime(1e-4, start + durSec);
-  src.start(start);
-  src.stop(start + durSec + 0.02);
-}
-
-function playTom(ctx, dest, noiseBuf, t, freq = 110, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const osc = new OscillatorNode(ctx, { type: "sine", frequency: freq });
-  const g = new GainNode(ctx, { gain: 0 });
-  osc.connect(g).connect(dest);
-  osc.frequency.setValueAtTime(freq, start);
-  osc.frequency.exponentialRampToValueAtTime(freq * 0.6, start + 0.18);
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(0.7 * velocity, start + 0.004);
-  g.gain.exponentialRampToValueAtTime(1e-4, start + 0.22);
-  osc.start(start); osc.stop(start + 0.25);
-  playFilteredNoise(ctx, dest, noiseBuf, start, 0.08, 0.12 * velocity, "bandpass", freq * 3, 2);
-}
-
-function playBassNote(ctx, dest, midi, t, durSec, velocity = 1) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const end = Math.min(start + durSec, ctx.length / ctx.sampleRate - 0.001);
+function playBassNote(ctx, dest, midi, t, durSec) {
   const osc = new OscillatorNode(ctx, { type: "triangle", frequency: midiToHz(midi) });
-  const sub = new OscillatorNode(ctx, { type: "sine", frequency: midiToHz(midi - 12) });
   const lpf = new BiquadFilterNode(ctx, { type: "lowpass", frequency: 620, Q: 1.0 });
-  const g = new GainNode(ctx, { gain: 0 });
-  const sg = new GainNode(ctx, { gain: 0 });
-  osc.connect(lpf).connect(g).connect(dest);
-  sub.connect(sg).connect(dest);
-  const peak = 0.5 * velocity;
-  g.gain.setValueAtTime(1e-4, start);
-  g.gain.exponentialRampToValueAtTime(peak, start + 0.012);
-  g.gain.exponentialRampToValueAtTime(peak * 0.45, Math.min(end, start + 0.15));
-  g.gain.exponentialRampToValueAtTime(1e-4, end);
-  sg.gain.setValueAtTime(1e-4, start);
-  sg.gain.exponentialRampToValueAtTime(peak * 0.35, start + 0.015);
-  sg.gain.exponentialRampToValueAtTime(1e-4, end);
-  osc.start(start); sub.start(start);
-  osc.stop(end + 0.02); sub.stop(end + 0.02);
+  const gn  = new GainNode(ctx, { gain: 0 });
+  osc.connect(lpf).connect(gn).connect(dest);
+  const end = t + durSec;
+  gn.gain.setValueAtTime(1e-4, t);
+  gn.gain.exponentialRampToValueAtTime(0.5, t + 0.012);
+  gn.gain.exponentialRampToValueAtTime(0.22, Math.min(end, t + 0.15));
+  gn.gain.exponentialRampToValueAtTime(1e-4, end);
+  osc.start(t);
+  osc.stop(end + 0.02);
 }
 
-function playPianoNote(ctx, dest, midi, t, durSec, velocity = 1, sustain = false) {
-  const start = safeTime(t, ctx.length / ctx.sampleRate);
-  const end = Math.min(start + durSec, ctx.length / ctx.sampleRate - 0.001);
-  const f = midiToHz(midi);
-  const fund = new OscillatorNode(ctx, { type: "triangle", frequency: f });
-  const oct  = new OscillatorNode(ctx, { type: "sine",     frequency: f * 2 });
-  const dtu  = new OscillatorNode(ctx, { type: "triangle", frequency: f * 1.006 });
-  const gFund = new GainNode(ctx, { gain: 0 });
-  const gOct  = new GainNode(ctx, { gain: 0 });
-  const gDtu  = new GainNode(ctx, { gain: 0 });
-  fund.connect(gFund).connect(dest);
-  oct.connect(gOct).connect(dest);
-  dtu.connect(gDtu).connect(dest);
-  // Sustained pad-style if sustain=true: longer release, lower peak.
-  const a = 0.006;
-  const peak = (sustain ? 0.16 : 0.22) * velocity;
-  const sustainLevel = sustain ? 0.13 * velocity : 0.07 * velocity;
-  const sustainAt = start + (sustain ? 0.25 : 0.15);
-  gFund.gain.setValueAtTime(1e-4, start);
-  gFund.gain.exponentialRampToValueAtTime(peak, start + a);
-  gFund.gain.exponentialRampToValueAtTime(sustainLevel, Math.min(end, sustainAt));
-  gFund.gain.exponentialRampToValueAtTime(1e-4, end);
-  gOct.gain.setValueAtTime(1e-4, start);
-  gOct.gain.exponentialRampToValueAtTime(0.07 * velocity, start + a);
-  gOct.gain.exponentialRampToValueAtTime(1e-4, Math.min(end, start + 0.3));
-  gDtu.gain.setValueAtTime(1e-4, start);
-  gDtu.gain.exponentialRampToValueAtTime(0.10 * velocity, start + a);
-  gDtu.gain.exponentialRampToValueAtTime(1e-4, end);
-  fund.start(start); oct.start(start); dtu.start(start);
-  fund.stop(end + 0.02); oct.stop(end + 0.02); dtu.stop(end + 0.02);
-}
+// ----- Per-stem renderers ----------------------------------------------------
 
-function playPianoChord(ctx, dest, midiArr, t, durSec, velocity = 1, sustain = false) {
-  midiArr.forEach((m, i) => {
-    playPianoNote(ctx, dest, m, t + i * 0.006, durSec, velocity, sustain);
-  });
-}
-
-// Pedal-steel voice with portamento (frequency ramp) and continuous sustain.
-// `glide` array: [{atTime, toMidi}] for tied notes — gives the voice a sustained
-// pad that bends from chord to chord without re-attacking.
-function playPedalSteelVoice(ctx, dest, glide, opts = {}) {
-  if (!glide || glide.length === 0) return;
-  const { pan = 0, velocity = 1, attackTime = 0.25 } = opts;
-  const first = glide[0];
-  const last  = glide[glide.length - 1];
-  const startT = safeTime(first.atTime, ctx.length / ctx.sampleRate);
-  const endT   = Math.min(last.atTime + (last.releaseAfter ?? 0.5), ctx.length / ctx.sampleRate - 0.001);
-  if (endT <= startT) return;
-
-  const osc = new OscillatorNode(ctx, { type: "sawtooth", frequency: midiToHz(first.toMidi) });
-  const lpf = new BiquadFilterNode(ctx, { type: "lowpass", frequency: 2400, Q: 0.7 });
-  const g = new GainNode(ctx, { gain: 0 });
-  const vib = new OscillatorNode(ctx, { type: "sine", frequency: 5.4 });
-  const vibAmt = new GainNode(ctx, { gain: 9 });
-  const panner = new StereoPannerNode(ctx, { pan });
-  vib.connect(vibAmt).connect(osc.detune);
-  osc.connect(lpf).connect(g).connect(panner).connect(dest);
-
-  // Schedule frequency glides between each waypoint.
-  for (let i = 1; i < glide.length; i++) {
-    const prev = glide[i - 1];
-    const curr = glide[i];
-    const t0 = safeTime(prev.atTime, ctx.length / ctx.sampleRate);
-    const t1 = safeTime(curr.atTime, ctx.length / ctx.sampleRate);
-    osc.frequency.setValueAtTime(midiToHz(prev.toMidi), t0);
-    osc.frequency.exponentialRampToValueAtTime(midiToHz(curr.toMidi), Math.max(t1, t0 + 0.05));
-  }
-
-  const peak = 0.10 * velocity;
-  g.gain.setValueAtTime(1e-4, startT);
-  g.gain.exponentialRampToValueAtTime(peak, startT + attackTime);
-  // Gently swell up and down through the duration
-  const mid = (startT + endT) / 2;
-  g.gain.exponentialRampToValueAtTime(peak * 1.05, mid);
-  g.gain.exponentialRampToValueAtTime(peak * 0.7, endT - 0.4);
-  g.gain.exponentialRampToValueAtTime(1e-4, endT);
-
-  vib.start(startT); osc.start(startT);
-  vib.stop(endT + 0.05); osc.stop(endT + 0.05);
-}
-
-// ============================================================================
-// GROOVE SELECTION
-// ============================================================================
-
-// Named groove definitions. Each is a complete pattern blueprint that the
-// renderer consumes. Adding a new feel = adding an entry here.
-const GROOVES = {
-  ballad: {
-    name: "ballad", label: "Ballad", swing: 0,
-    kickPattern:  [0.9, 0, 0, 0, 0.8, 0, 0, 0],
-    snarePattern: [0, 0, 0.7, 0, 0, 0, 0.7, 0],
-    hatPattern:   [0, 0, 0, 0, 0, 0, 0, 0],
-    brushPattern: [0.5, 0.3, 0.5, 0.3, 0.5, 0.3, 0.5, 0.3],
-    bassFeel: "two", pianoFeel: "ballad", steelFeel: "swells",
-    fillProbability: 0.4,
-  },
-  "two-step": {
-    name: "two-step", label: "Two-step", swing: 0,
-    kickPattern:  [1.0, 0, 0, 0, 0.9, 0, 0, 0],
-    snarePattern: [0, 0, 0.85, 0, 0, 0, 0.9, 0],
-    hatPattern:   [0.4, 0.3, 0.45, 0.3, 0.4, 0.3, 0.45, 0.3],
-    brushPattern: null,
-    bassFeel: "two", pianoFeel: "honkytonk", steelFeel: "sustain",
-    fillProbability: 0.55,
-  },
-  train: {
-    name: "train", label: "Train beat", swing: 0.12,
-    kickPattern:  [1.0, 0, 0, 0, 1.0, 0, 0, 0],
-    snarePattern: [0.25, 0.25, 0.95, 0.25, 0.25, 0.25, 0.95, 0.25],
-    hatPattern:   [0.35, 0.3, 0.35, 0.3, 0.35, 0.3, 0.35, 0.3],
-    brushPattern: null,
-    bassFeel: "walk", pianoFeel: "honkytonk", steelFeel: "swells",
-    fillProbability: 0.7,
-  },
-  shuffle: {
-    name: "shuffle", label: "Shuffle", swing: 0.16,
-    kickPattern:  [1.0, 0, 0, 0, 0.95, 0, 0, 0],
-    snarePattern: [0, 0.2, 0.9, 0.2, 0, 0.2, 0.95, 0.2],
-    hatPattern:   [0.45, 0.3, 0.45, 0.3, 0.45, 0.3, 0.45, 0.3],
-    brushPattern: null,
-    bassFeel: "walk", pianoFeel: "honkytonk", steelFeel: "sustain",
-    fillProbability: 0.6,
-  },
-};
-
-// Public list of all available feels (for UI rendering).
-// The "auto" pseudo-feel means "pick by BPM" — handled by chooseGroove().
-export const AVAILABLE_GROOVES = [
-  { key: "auto",     label: "Auto (by BPM)" },
-  { key: "ballad",   label: GROOVES.ballad.label },
-  { key: "two-step", label: GROOVES["two-step"].label },
-  { key: "train",    label: GROOVES.train.label },
-  { key: "shuffle",  label: GROOVES.shuffle.label },
-];
-
-// Pick groove by name; falls back to BPM-based auto-select.
-function chooseGroove(bpm, override) {
-  if (override && override !== "auto" && GROOVES[override]) return GROOVES[override];
-  // Auto-pick by BPM
-  if (bpm < 90)  return GROOVES.ballad;
-  if (bpm < 115) return GROOVES["two-step"];
-  if (bpm < 145) return GROOVES.train;
-  return GROOVES.shuffle;
-}
-
-// Compute time within a 2-beat phrase for slot index 0..7 (8 eighth slots).
-function slotTime(slot, secondsPerBeat, swing) {
-  const beat = Math.floor(slot / 2);
-  const sub  = slot % 2;
-  const half = secondsPerBeat / 2;
-  const andOff = half + swing * half;
-  return beat * secondsPerBeat + (sub === 0 ? 0 : andOff);
-}
-
-// ============================================================================
-// STEM RENDERERS — now beat-grid aware (use `beats` array)
-// ============================================================================
-
-function renderDrums(ctx, master, { chords, beats, duration, groove, rng }) {
-  const noise = makeNoiseBuffer(ctx, 1);
+function renderDrums(ctx, master, { beats, duration }) {
   if (beats.length === 0) return;
-  const spb = (beats[beats.length - 1] - beats[0]) / Math.max(1, beats.length - 1);
+  const noise = makeNoiseBuffer(ctx, 0.4);
 
-  // Process in 2-beat phrases anchored on the actual detected beats.
-  const chordChangeTimes = new Set(chords.slice(1).map((c) => c.start));
-  const isApproachingChange = (phraseStart, phraseSec) => {
-    for (const t of chordChangeTimes) {
-      if (t > phraseStart && t <= phraseStart + phraseSec) return true;
-    }
-    return false;
-  };
-
-  for (let i = 0; i < beats.length - 1; i += 2) {
-    const phraseStart = beats[i];
-    const nextBeat = beats[i + 1] ?? (phraseStart + spb);
-    const beatAfter = beats[i + 2] ?? (nextBeat + spb);
-    const phraseSec = beatAfter - phraseStart;
-    if (phraseStart >= duration) break;
-
-    const doFill = isApproachingChange(phraseStart, phraseSec) && rng() < groove.fillProbability;
-
-    if (doFill) {
-      // 6-note tom & snare fill across the 2-beat phrase
-      const fillNotes = 6;
-      const step = phraseSec / fillNotes;
-      const toms = [180, 150, 120, 110, 95, 80];
-      for (let n = 0; n < fillNotes; n++) {
-        const ft = phraseStart + n * step + jitter(rng, 0.008);
-        if (n === fillNotes - 1) {
-          playKick(ctx, master, ft, 0.85);
-          playSnare(ctx, master, noise, ft, 0.9);
-        } else if (n % 2 === 0) {
-          playTom(ctx, master, noise, ft, toms[n % toms.length], 0.75 + jitter(rng, 0.1));
-        } else {
-          playSnare(ctx, master, noise, ft, 0.55 + jitter(rng, 0.15));
-        }
-      }
-      continue;
-    }
-
-    // Normal 2-beat pattern across 8 eighth-note slots
-    for (let slot = 0; slot < 8; slot++) {
-      const slotT = phraseStart + slotTime(slot, spb, groove.swing);
-      if (slotT >= duration) break;
-      const kv = groove.kickPattern[slot];
-      const sv = groove.snarePattern[slot];
-      const hv = groove.hatPattern[slot];
-      const bv = groove.brushPattern ? groove.brushPattern[slot] : 0;
-      const jit = jitter(rng, 0.005);
-      if (kv > 0) playKick(ctx, master, slotT + jit, kv * (0.9 + jitter(rng, 0.1)));
-      if (sv > 0) {
-        if (groove.name === "ballad" && sv < 0.8) playRim(ctx, master, slotT + jit, sv);
-        else playSnare(ctx, master, noise, slotT + jit, sv * (0.9 + jitter(rng, 0.1)));
-      }
-      if (hv > 0) playHat(ctx, master, noise, slotT + jit, hv * (0.85 + jitter(rng, 0.15)));
-      if (bv > 0) playBrush(ctx, master, noise, slotT, spb / 2 * 0.95, bv);
-    }
-  }
-}
-
-function renderBass(ctx, master, { chords, beats, duration, groove, rng, keyRoot, keyQuality }) {
-  if (beats.length === 0) return;
-  const spb = (beats[beats.length - 1] - beats[0]) / Math.max(1, beats.length - 1);
-
-  // Build a chord lookup per beat index
-  const chordAtBeat = beats.map((tb) => {
-    for (const c of chords) if (tb >= c.start - 0.01 && tb < c.end - 0.01) return c;
-    return chords[0];
-  });
-
-  for (let bi = 0; bi < beats.length; bi++) {
-    const t = beats[bi];
+  // Bar position is beat-index mod 4: 0 → beat 1, 1 → beat 2, 2 → beat 3, 3 → beat 4.
+  // Pattern, identical every bar:
+  //   beat 1: kick + closed hat
+  //   beat 2: snare + closed hat
+  //   beat 3: kick + closed hat
+  //   beat 4: snare + closed hat
+  for (let i = 0; i < beats.length; i++) {
+    const t = beats[i];
     if (t >= duration) break;
-    const seg = chordAtBeat[bi];
-    if (!seg) continue;
-    const nextSeg = chordAtBeat[bi + 1] ?? seg;
-    const isLastBeatOfChord = (nextSeg !== seg) || bi === beats.length - 1;
-
-    const rootPc = seg.root;
-    const fifthPc = (rootPc + 7) % 12;
-    // Walk scale: pentatonic + 6 + b7 (no half-steps under the bass).
-    const walkScale = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality, "walk");
-
-    let pc;
-
-    if (isLastBeatOfChord && nextSeg !== seg) {
-      // Approach the next chord's root. Country idiom: either a diatonic
-      // step (in the *next* chord's scale) or a chromatic leading tone
-      // a half-step below. We pick chromatic ~40% of the time over major
-      // chords for the classic "country walk-up."
-      const nextRootPc = nextSeg.root;
-      const nextScale = scaleForChord(nextSeg.root, nextSeg.quality, keyRoot, keyQuality, "walk");
-      const chromatic = rng() < 0.4 && nextSeg.quality === "maj";
-      if (chromatic) {
-        pc = (nextRootPc + 11) % 12;             // half-step below next root
-      } else {
-        // Diatonic step from above or below the next root, in next chord's scale.
-        const fromMidi = 36 + rootPc;
-        const toMidi   = 36 + nextRootPc;
-        const dir = toMidi >= fromMidi ? -1 : 1; // approach from the closer side
-        const approach = nearestInScale(toMidi + dir * 2, nextScale);
-        pc = ((approach % 12) + 12) % 12;
-      }
-    } else if (groove.bassFeel === "two") {
-      // Boom-chick: root on 1 & 3, fifth on 2 & 4 (relative to chord onset).
-      const localBeat = (bi - beats.findIndex((tb) => tb >= seg.start - 0.005));
-      pc = localBeat % 2 === 0 ? rootPc : fifthPc;
-    } else {
-      // Walking: classic country bass pattern R-3-5-6 (over a major chord) or
-      // R-b3-5-6 (over a minor). Cycles 4-beat phrases relative to chord onset.
-      // walkScale for a major chord = [R, 2, 3, 5, 6, b7]; we take indices
-      // [0, 2, 3, 4] which gives R, 3, 5, 6.
-      const localBeat = bi - beats.findIndex((tb) => tb >= seg.start - 0.005);
-      // For minor (Dorian-flavored walk), scaleForChord returns the dorian
-      // pattern instead: [R, 2, b3, 5, 6, b7]; the same indices give R, b3, 5, 6.
-      const scaleDegrees =
-        groove.bassFeel === "walk"
-          ? (walkScale.length >= 4 ? [0, 2, 3, 4] : [0, 0, 0, 0])
-          : [0, 0, 0, 0];
-      const idx = scaleDegrees[localBeat % scaleDegrees.length] ?? 0;
-      pc = walkScale[Math.min(idx, walkScale.length - 1)];
-    }
-
-    const midi = 36 + pc;
-    const noteDur = spb * (0.88 + jitter(rng, 0.05));
-    const vel = 0.85 + jitter(rng, 0.12);
-    playBassNote(ctx, master, midi, t + jitter(rng, 0.004), noteDur, vel);
+    const posInBar = i % 4;
+    if (posInBar === 0 || posInBar === 2) playKick (ctx, master, t);
+    if (posInBar === 1 || posInBar === 3) playSnare(ctx, master, noise, t);
+    playClosedHat(ctx, master, noise, t);
   }
 }
 
-function renderPiano(ctx, master, { chords, beats, duration, groove, rng, keyRoot, keyQuality }) {
+function renderBass(ctx, master, { chords, beats, duration }) {
   if (beats.length === 0) return;
-  const spb = (beats[beats.length - 1] - beats[0]) / Math.max(1, beats.length - 1);
+  // Average beat duration, used for note length.
+  const span = beats[beats.length - 1] - beats[0];
+  const avgSpb = span / Math.max(1, beats.length - 1);
 
-  let prevVoicing = null;
-  // For each chord segment, lay out a sustained voicing and add per-beat decoration.
-  for (let ci = 0; ci < chords.length; ci++) {
-    const seg = chords[ci];
-    if (seg.start >= duration) break;
-    const segEnd = Math.min(seg.end, duration);
-    const segDur = segEnd - seg.start;
-
-    const voicing = voiceLedTriad(seg.root, seg.quality, prevVoicing);
-    prevVoicing = voicing;
-
-    if (groove.pianoFeel === "ballad") {
-      // Held voicing for the whole chord, plus a soft re-strike halfway through.
-      playPianoChord(ctx, master, voicing, seg.start, segDur, 0.75, true);
-      if (segDur > spb * 3) {
-        playPianoChord(ctx, master, voicing, seg.start + segDur / 2, segDur / 2, 0.5, true);
-      }
-      // Scalar fill on the last beat before chord change
-      addScalarFill(ctx, master, voicing, seg, chords[ci + 1], spb, rng, keyRoot, keyQuality);
-      continue;
-    }
-
-    // Honky-tonk: left-hand boom-chick + right-hand sustained voicing + stab on 2 & 4
-    const lhRoot = 12 * 4 + seg.root;
-    const lhFifth = lhRoot + 7;
-
-    // Sustained right-hand pad (quiet) under the rhythm
-    playPianoChord(ctx, master, voicing, seg.start, segDur, 0.4, true);
-
-    // Find which beats fall within this segment
-    const segBeats = beats
-      .map((tb, idx) => ({ tb, idx }))
-      .filter((b) => b.tb >= seg.start - 0.005 && b.tb < segEnd - 0.005);
-
-    segBeats.forEach((b, localIdx) => {
-      const t = b.tb;
-      // Left-hand boom on beats 1 and 3 of each chord (i.e. localIdx 0, 2, 4, ...)
-      if (localIdx % 2 === 0) {
-        const m = localIdx % 4 === 0 ? lhRoot : lhFifth;
-        playPianoNote(ctx, master, m, t + jitter(rng, 0.005), spb * 0.9, 0.55 + jitter(rng, 0.08));
-      }
-      // Right-hand stab on 2 and 4
-      if (localIdx % 2 === 1) {
-        playPianoChord(ctx, master, voicing, t + jitter(rng, 0.005), spb * 0.4, 0.55 + jitter(rng, 0.12), false);
-      }
-    });
-
-    // Scalar fill at end of chord (going into the change)
-    addScalarFill(ctx, master, voicing, seg, chords[ci + 1], spb, rng, keyRoot, keyQuality);
-  }
-}
-
-function addScalarFill(ctx, master, voicing, seg, nextSeg, spb, rng, keyRoot, keyQuality) {
-  if (!nextSeg) return;
-  if (rng() > 0.45) return;          // 45% of changes get a fill
-  const fillBeats = 1;               // last beat of the chord
-  const fillStart = seg.end - spb * fillBeats;
-  if (fillStart <= seg.start) return;
-
-  // Hybrid country scale on the current chord — gives us pentatonic + b3 + b7.
-  const scalePcs = scaleForChord(seg.root, seg.quality, keyRoot, keyQuality, "fill");
-
-  // Phrase grammar:
-  //   - START on a chord tone (root / 3rd / 5th) of the *current* chord.
-  //   - END on the ROOT (or 5th) of the *next* chord.
-  //   - Move stepwise within the chosen scale, no leaps larger than a 3rd.
-  const chordToneOffsets = seg.quality === "maj" ? [0, 4, 7] : [0, 3, 7];
-  const startPc = (seg.root + chordToneOffsets[Math.floor(rng() * chordToneOffsets.length)]) % 12;
-  // Pick a starting MIDI near the previous top voice for smooth voice-leading.
-  const topVoice = voicing[voicing.length - 1];
-  const startMidi = nearestInScale(topVoice + 0, [startPc]);
-
-  // End target: the root (80%) or the 5th (20%) of the next chord, near the start MIDI.
-  const endPc = rng() < 0.8 ? nextSeg.root : (nextSeg.root + 7) % 12;
-  const endMidi = nearestInScale(startMidi, [endPc]);
-
-  const notes = 4;                   // 4 sixteenth-ish notes across one beat
-  const step = (spb * fillBeats) / notes;
-  const line = walkingLine(startMidi, endMidi, notes, scalePcs);
-
-  for (let i = 0; i < line.length; i++) {
-    // Pushing slightly ahead of the beat is idiomatic; never drag behind.
-    const ahead = -Math.abs(jitter(rng, 0.006));
-    const t = fillStart + i * step + ahead;
-    // Slight velocity arc: louder in the middle of the lick.
-    const vel = 0.5 + (i === 1 || i === 2 ? 0.15 : 0) + jitter(rng, 0.06);
-    playPianoNote(ctx, master, line[i], t, step * 0.85, vel);
-  }
-}
-
-// Pedal steel: build a continuous, tied-together set of 3 voices (low/mid/top)
-// that bend across chord changes via portamento. One long voice per chord-segment-pair.
-function renderPedalSteel(ctx, master, { chords, duration, groove, rng }) {
-  if (chords.length === 0) return;
-
-  // Voice leading: produce a sequence of 3-note voicings, one per chord segment.
-  const voicings = [];
-  let prev = null;
-  for (const seg of chords) {
-    const v = voiceLedTriad(seg.root, seg.quality, prev);
-    // Move into pedal-steel sweet spot (G3..G5).
-    const adjusted = v.map((m) => {
-      while (m < 55) m += 12;
-      while (m > 79) m -= 12;
-      return m;
-    }).sort((a, b) => a - b);
-    voicings.push(adjusted);
-    prev = adjusted;
-  }
-
-  // For each voice (low/mid/top), schedule ONE pedal-steel oscillator that
-  // glides between the assigned MIDI notes at each chord change.
-  for (let voiceIdx = 0; voiceIdx < 3; voiceIdx++) {
-    const pan = -0.35 + voiceIdx * 0.35;
-    const glide = [];
+  // Helper: find the chord active at time `t`.
+  function chordAt(t) {
     for (let i = 0; i < chords.length; i++) {
-      const seg = chords[i];
-      if (seg.start >= duration) break;
-      const midi = voicings[i][voiceIdx];
-      // Slight per-chord strum: voices arrive a few ms apart.
-      const t = seg.start + voiceIdx * 0.04 + jitter(rng, 0.01);
-      glide.push({ atTime: t, toMidi: midi });
+      const c = chords[i];
+      if (t >= c.start - 1e-3 && t < c.end - 1e-3) return c;
     }
-    if (glide.length === 0) continue;
-    // Tail: hold the last note for up to 1.2 s past the end of the last segment.
-    const lastSegEnd = Math.min(chords[Math.min(chords.length - 1, glide.length - 1)].end, duration);
-    glide[glide.length - 1].releaseAfter = Math.min(1.2, duration - glide[glide.length - 1].atTime - 0.05);
-    if (glide[glide.length - 1].releaseAfter < 0.2) glide[glide.length - 1].releaseAfter = 0.2;
+    return chords[0] ?? null;
+  }
 
-    const swell = groove.steelFeel === "swells";
-    playPedalSteelVoice(ctx, master, glide, {
-      pan,
-      velocity: 0.9 + jitter(rng, 0.06),
-      attackTime: swell ? 0.35 : 0.18,
-    });
+  // One quarter-note bass root per beat.
+  const noteDur = avgSpb * 0.92;
+  for (let i = 0; i < beats.length; i++) {
+    const t = beats[i];
+    if (t >= duration) break;
+    const seg = chordAt(t);
+    if (!seg) continue;
+    // Bass register: anchor on C2 (MIDI 36). pitch class = seg.root (0..11).
+    const midi = 36 + seg.root;
+    playBassNote(ctx, master, midi, t, noteDur);
   }
 }
 
-// ============================================================================
-// TOP-LEVEL RENDER
-// ============================================================================
+// ----- Top-level render ------------------------------------------------------
 
-async function renderStem({ chords, beats, bpm, duration, stem, keyRoot, keyQuality, feel }) {
-  const safeBpm = Number.isFinite(bpm) && bpm > 20 ? bpm : 100;
-  const groove = chooseGroove(safeBpm, feel);
+async function renderStem({ chords, beats, duration, stem }) {
   const numSamples = Math.max(1, Math.ceil(duration * RENDER_SAMPLE_RATE));
   const ctx = new OfflineAudioContext(2, numSamples, RENDER_SAMPLE_RATE);
 
-  const gains = { drums: 0.85, bass: 0.75, piano: 0.55, pedalSteel: 0.5 };
+  // Per-stem master gain. Tuned for rough loudness parity. No bus effects.
+  const gains = { drums: 0.85, bass: 0.75 };
   const master = new GainNode(ctx, { gain: gains[stem] ?? 0.7 });
+  master.connect(ctx.destination);
 
-  if (stem === "drums") {
-    const ws = new WaveShaperNode(ctx, { curve: softClipCurve(), oversample: "2x" });
-    master.connect(ws).connect(ctx.destination);
-  } else {
-    master.connect(ctx.destination);
-  }
-
-  const seed = ({ drums: 11, bass: 23, piano: 37, pedalSteel: 53 })[stem] ?? 1;
-  const rng = makeRng(seed + Math.round(safeBpm));
-  const ctxArgs = { chords, beats, bpm: safeBpm, duration, groove, rng, keyRoot, keyQuality };
-
-  if (stem === "drums")            renderDrums(ctx, master, ctxArgs);
-  else if (stem === "bass")        renderBass(ctx, master, ctxArgs);
-  else if (stem === "piano")       renderPiano(ctx, master, ctxArgs);
-  else if (stem === "pedalSteel")  renderPedalSteel(ctx, master, ctxArgs);
+  if      (stem === "drums") renderDrums(ctx, master, { beats, duration });
+  else if (stem === "bass")  renderBass (ctx, master, { chords, beats, duration });
 
   return ctx.startRendering();
 }
 
-function softClipCurve() {
-  const n = 1024;
-  const curve = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = (i / (n - 1)) * 2 - 1;
-    curve[i] = Math.tanh(x * 1.4) / Math.tanh(1.4);
-  }
-  return curve;
-}
+export const STEMS = ["drums", "bass"];
 
-export async function renderAllStems(analysis, durationCap, onProgress, feel) {
-  const stems = ["drums", "bass", "piano", "pedalSteel"];
+export async function renderAllStems(analysis, durationCap, onProgress) {
   const out = [];
-  for (let i = 0; i < stems.length; i++) {
-    const name = stems[i];
-    onProgress?.(name, i, stems.length);
+  for (let i = 0; i < STEMS.length; i++) {
+    const name = STEMS[i];
+    onProgress?.(name, i, STEMS.length);
     const buffer = await renderStem({
       chords: analysis.chords,
-      beats: analysis.beats,
-      bpm: analysis.bpm,
+      beats:  analysis.beats,
       duration: durationCap,
-      keyRoot: analysis.keyRoot,
-      keyQuality: analysis.keyQuality,
       stem: name,
-      feel,
     });
     const blob = encodeWav(buffer);
     out.push({ name, blob, url: URL.createObjectURL(blob), buffer });
   }
   return out;
-}
-
-// Expose groove info so the UI can display what was chosen. `feel` may be
-// "auto" or a named groove key — when "auto", the result is BPM-derived.
-export function describeGroove(bpm, feel) {
-  const g = chooseGroove(Number.isFinite(bpm) && bpm > 20 ? bpm : 100, feel);
-  return { key: g.name, label: g.label, swing: g.swing };
 }

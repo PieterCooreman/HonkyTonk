@@ -255,7 +255,7 @@ h1.display .accent {
   text-align: center;
 }
 @media (min-width: 640px) {
-  .stats { grid-template-columns: repeat(4, minmax(0,1fr)); }
+  .stats { grid-template-columns: repeat(3, minmax(0,1fr)); }
 }
 .stat .value {
   font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
@@ -276,56 +276,139 @@ h1.display .accent {
   margin-top: .375rem;
 }
 
-/* Feel selector (replaces the static "value" stat for Feel) ------------ */
+/* Editable BPM + Key stats ---------------------------------------------- */
 
-.stat.stat-feel {
+.stat-input {
+  width: 100%;
+  max-width: 5rem;
+  margin: 0 auto;
+  font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
+  font-size: 2.25rem;
+  letter-spacing: .04em;
+  line-height: 1;
+  color: var(--primary);
+  background: color-mix(in oklab, var(--background) 55%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .15rem .35rem;
+  text-align: center;
+  -moz-appearance: textfield;       /* hide Firefox spinner */
+}
+.stat-input:hover  { border-color: var(--primary); }
+.stat-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+.stat-input:disabled { opacity: .5; cursor: not-allowed; }
+.stat-input::-webkit-outer-spin-button,
+.stat-input::-webkit-inner-spin-button {
+  /* Default WebKit spinners are tiny and ugly. Hide them; arrow keys still work. */
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.stat.stat-key {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
   gap: 0;
 }
-
-.feel-select {
+.stat-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .25rem;
+  flex-wrap: nowrap;
+  max-width: 100%;
+}
+.stat-select {
   font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
-  font-size: 1.25rem;
+  font-size: 2.25rem;
   letter-spacing: .04em;
   color: var(--primary);
   background: color-mix(in oklab, var(--background) 55%, transparent);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: .2rem .35rem;
-  width: 100%;
-  max-width: 100%;
-  text-align: center;
-  text-align-last: center;          /* Firefox-friendly centered display */
+  padding: .15rem .35rem;
   cursor: pointer;
+  line-height: 1;
   -webkit-appearance: none;
   appearance: none;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--primary) 50%),
-    linear-gradient(135deg, var(--primary) 50%, transparent 50%);
-  background-position:
-    calc(100% - 12px) calc(50% + 1px),
-    calc(100% - 7px)  calc(50% + 1px);
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
-  padding-right: 1.35rem;
-  line-height: 1.1;
-  text-overflow: ellipsis;
+  text-align: center;
+  text-align-last: center;
 }
-.feel-select:hover { border-color: var(--primary); }
-.feel-select:focus {
+.stat-select:hover { border-color: var(--primary); }
+.stat-select:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 2px color-mix(in oklab, var(--primary) 35%, transparent);
 }
-.feel-select:disabled { opacity: .5; cursor: not-allowed; }
-.feel-select option {
+.stat-select:disabled { opacity: .5; cursor: not-allowed; }
+.stat-select option {
   font-family: ui-sans-serif, system-ui, sans-serif;
   font-size: .9rem;
   background: var(--card);
   color: var(--foreground);
+}
+.stat-select-tiny {
+  font-size: 1rem;
+  padding: .1rem .25rem;
+  align-self: center;
+}
+
+/* Generate / Regenerate button --------------------------------------- */
+
+.generate-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .75rem;
+  margin: 0;
+  text-align: center;
+}
+
+.btn-generate {
+  font-family: "Bebas Neue", Impact, ui-sans-serif, sans-serif;
+  font-size: 1.4rem;
+  letter-spacing: .06em;
+  color: var(--primary-foreground);
+  background: var(--primary);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: .6rem 1.5rem;
+  min-width: 14rem;
+  cursor: pointer;
+  transition: filter .15s, transform .05s;
+}
+.btn-generate:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-generate:active:not(:disabled) { transform: translateY(1px); }
+.btn-generate:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.stale-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .8125rem;
+  color: var(--muted-foreground);
+}
+.stale-dot {
+  display: inline-block;
+  width: .5rem;
+  height: .5rem;
+  border-radius: 50%;
+  background: var(--destructive);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 25%, transparent);
+}
+
+.generate-hint {
+  margin: 0;
+  font-size: .75rem;
+  color: var(--muted-foreground);
+  max-width: 32rem;
 }
 
 /* Chord list ------------------------------------------------------------- */
@@ -521,44 +604,6 @@ h1.display .accent {
 }
 .track-download:hover { filter: brightness(1.15); }
 .track-download svg { width: .9rem; height: .9rem; }
-
-.offset-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: .75rem;
-  margin-top: .75rem;
-  padding: .5rem .25rem;
-  font-size: .8125rem;
-  color: var(--muted-foreground);
-}
-.offset-label-text { white-space: nowrap; }
-.offset-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  background: var(--muted);
-  border-radius: 9999px;
-  cursor: pointer;
-}
-.offset-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--primary);
-  border: 0;
-}
-.offset-slider::-moz-range-thumb {
-  width: 12px; height: 12px; border-radius: 50%;
-  background: var(--primary); border: 0;
-}
-.offset-value {
-  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, monospace;
-  min-width: 4rem;
-  text-align: right;
-}
 
 .mixer-hint {
   margin: .75rem 0 0;

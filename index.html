@@ -73,13 +73,34 @@
         <div id="error-msg" class="error-msg hidden" role="alert"></div>
 
         <div id="stats" class="stats hidden">
-          <div class="stat"><div class="value" id="stat-bpm"></div><div class="label">BPM</div></div>
-          <div class="stat"><div class="value" id="stat-key"></div><div class="label">Key (est.)</div></div>
-          <div class="stat"><div class="value" id="stat-chords"></div><div class="label">Chords</div></div>
-          <div class="stat stat-feel">
-            <select id="feel-select" class="feel-select" aria-label="Feel"></select>
-            <div class="label">Feel</div>
+          <div class="stat">
+            <input id="stat-bpm-input" class="value stat-input" type="number"
+                   min="40" max="220" step="1" inputmode="numeric"
+                   aria-label="BPM" />
+            <div class="label">BPM</div>
           </div>
+          <div class="stat stat-key">
+            <div class="stat-key-row">
+              <select id="stat-key-root" class="value stat-select" aria-label="Key root"></select>
+              <select id="stat-key-quality" class="stat-select stat-select-tiny" aria-label="Key quality">
+                <option value="maj">maj</option>
+                <option value="min">min</option>
+              </select>
+            </div>
+            <div class="label">Key</div>
+          </div>
+          <div class="stat"><div class="value" id="stat-chords"></div><div class="label">Chords</div></div>
+        </div>
+
+        <div id="generate-section" class="generate-section hidden">
+          <button id="generate-btn" type="button" class="btn-generate">Generate stems</button>
+          <div id="stale-indicator" class="stale-indicator hidden">
+            <span class="stale-dot" aria-hidden="true"></span>
+            <span>Stems are out of date — click Regenerate</span>
+          </div>
+          <p class="generate-hint">
+            Review the BPM and key above. Adjust if anything looks off, then click Generate.
+          </p>
         </div>
 
         <div id="chord-section" class="hidden">
@@ -111,16 +132,8 @@
 
           <div id="mixer-tracks" class="mixer-tracks"></div>
 
-          <div class="offset-row">
-            <label for="offset-slider" class="offset-label-text">Stems offset vs original</label>
-            <input id="offset-slider" class="offset-slider" type="range"
-                   min="-500" max="500" step="5" value="0" />
-            <span id="offset-label" class="offset-value">0 ms</span>
-          </div>
-
           <p class="mixer-hint">
             Use mute (<kbd>M</kbd>) / solo (<kbd>S</kbd>) per track. Spacebar toggles play/pause.
-            If the band feels a touch ahead of or behind the song, nudge with the offset slider.
           </p>
         </div>
       </div>
